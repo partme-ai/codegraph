@@ -272,7 +272,7 @@ export const zigExtractor: LanguageExtractor = {
           if (m) {
             ctx.addUnresolvedReference({
               fromNodeId: ctx.nodeStack[ctx.nodeStack.length - 1] || '',
-              referenceName: m[1],
+              referenceName: m[1]!,
               referenceKind: 'imports',
               line: importNode.startPosition.row + 1,
               column: importNode.startPosition.column,
@@ -338,7 +338,7 @@ export const zigExtractor: LanguageExtractor = {
         if (parentId) {
           ctx.addUnresolvedReference({
             fromNodeId: parentId,
-            referenceName: m[1],
+            referenceName: m[1]!,
             referenceKind: 'imports',
             line: node.startPosition.row + 1,
             column: node.startPosition.column,
