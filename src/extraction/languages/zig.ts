@@ -345,7 +345,10 @@ export const zigExtractor: LanguageExtractor = {
         return true;
       }
 
-      // @import — may be direct or nested inside field_expression
+      // @import — may be direct or nested inside field_expression.
+      // Create an `import` node (like Java) for each @import, plus an
+      // unresolved `imports` reference. Return `true` to skip the core's
+      // extractVariable (avoids duplicate `constant` node).
       for (let i = 0; i < node.namedChildCount; i++) {
         const child = node.namedChild(i);
         if (!child) continue;
@@ -354,15 +357,24 @@ export const zigExtractor: LanguageExtractor = {
           const text = ctx.source.substring(importNode.startIndex, importNode.endIndex);
           const m = text.match(/@import\s*\(\s*"([^"]+)"\s*\)/);
           if (m) {
-            ctx.addUnresolvedReference({
-              fromNodeId: ctx.nodeStack[ctx.nodeStack.length - 1] || '',
-              referenceName: m[1]!,
-              referenceKind: 'imports',
-              line: importNode.startPosition.row + 1,
-              column: importNode.startPosition.column,
-            });
+            const moduleName = m[1]!;
+            const sig = ctx.source.substring(node.startIndex, Math.min(node.endIndex, node.startIndex + 80)).trim();
+            const importId = ctx.createNode('import', moduleName, node, { signature: sig });
+            if (importId) {
+              ctx.addUnresolvedReference({
+                fromNodeId: importId.id,
+                referenceName: moduleName,
+                referenceKind: 'imports',
+                line: importNode.startPosition.row + 1,
+                column: importNode.startPosition.column,
+              });
+            }
           }
         }
+      }
+      // Skip core's extractVariable if we found an @import
+      for (let i = 0; i < node.namedChildCount; i++) {
+        if (node.namedChild(i) && findImportBuiltin(node.namedChild(i)!, ctx.source)) return true;
       }
       return false;
     }
@@ -418,11 +430,12 @@ export const zigExtractor: LanguageExtractor = {
       const text = ctx.source.substring(node.startIndex, node.endIndex);
       const m = text.match(/@import\s*\(\s*"([^"]+)"\s*\)/);
       if (m) {
-        const parentId = ctx.nodeStack[ctx.nodeStack.length - 1];
-        if (parentId) {
+        const moduleName = m[1]!;
+        const importId = ctx.createNode('import', moduleName, node, { signature: text.trim() });
+        if (importId) {
           ctx.addUnresolvedReference({
-            fromNodeId: parentId,
-            referenceName: m[1]!,
+            fromNodeId: importId.id,
+            referenceName: moduleName,
             referenceKind: 'imports',
             line: node.startPosition.row + 1,
             column: node.startPosition.column,
