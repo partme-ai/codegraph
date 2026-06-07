@@ -151,6 +151,66 @@ function extractFnSignature(node: SyntaxNode, source: string): string | undefine
   return sig.trim() || undefined;
 }
 
+/** Walk a Zig type subtree to find custom type identifiers, emitting `references`. */
+function extractZigTypeRefs(node: SyntaxNode, fromNodeId: string, ctx: ExtractorContext): void {
+  if (node.type === 'builtin_type') return;
+  if (node.type === 'parameter') {
+    for (let i = 0; i < node.namedChildCount; i++) {
+      const child = node.namedChild(i);
+      if (!child || child.type === 'identifier') continue;
+      extractZigTypeRefs(child, fromNodeId, ctx);
+    }
+    return;
+  }
+  // field_expression like `std.mem.Allocator`: only the last identifier
+  // (`Allocator`) is the type — skip the module-path segments (`std`, `mem`).
+  if (node.type === 'field_expression') {
+    for (let i = 0; i < node.namedChildCount; i++) {
+      const child = node.namedChild(i);
+      if (!child) continue;
+      // The `object` part is the namespace chain — only recurse, don't emit
+      if (child.type === 'field_expression' || child.type === 'identifier') {
+        const fieldName = node.fieldNameForNamedChild(i);
+        if (fieldName === 'object') continue; // module path, not a type ref
+        extractZigTypeRefs(child, fromNodeId, ctx);
+      } else {
+        extractZigTypeRefs(child, fromNodeId, ctx);
+      }
+    }
+    return;
+  }
+  if (node.type === 'identifier') {
+    ctx.addUnresolvedReference({
+      fromNodeId,
+      referenceName: getNodeText(node, ctx.source),
+      referenceKind: 'references',
+      line: node.startPosition.row + 1,
+      column: node.startPosition.column,
+    });
+    return;
+  }
+  if (node.type === 'anonymous_struct_initializer' || node.type === 'struct_initializer') return;
+  for (let i = 0; i < node.namedChildCount; i++) {
+    const child = node.namedChild(i);
+    if (child) extractZigTypeRefs(child, fromNodeId, ctx);
+  }
+}
+
+/** Extract type references from a Zig function_declaration's parameters and return type. */
+function extractFnTypeRefs(node: SyntaxNode, nodeId: string, ctx: ExtractorContext): void {
+  // Parameters — not a named field in tree-sitter-zig
+  for (let i = 0; i < node.namedChildCount; i++) {
+    const child = node.namedChild(i);
+    if (child?.type === 'parameters') {
+      extractZigTypeRefs(child, nodeId, ctx);
+      break;
+    }
+  }
+  // Return type — the `type` named field
+  const returnType = getChildByField(node, 'type');
+  if (returnType) extractZigTypeRefs(returnType, nodeId, ctx);
+}
+
 export const zigExtractor: LanguageExtractor = {
   functionTypes: ['function_declaration'],
   classTypes: [],
@@ -212,6 +272,7 @@ export const zigExtractor: LanguageExtractor = {
 
       ctx.pushScope(fnNode.id);
       walkBodyForCalls(body, fnNode.id, ctx);
+      extractFnTypeRefs(node, fnNode.id, ctx);
       ctx.popScope();
       return true;
     }
