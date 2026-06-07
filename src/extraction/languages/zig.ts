@@ -10,7 +10,14 @@ const ZIG_TYPE_DECL_TYPES = new Set([
   'error_set_declaration',
 ]);
 
-const INSTANTIATION_KINDS = new Set(['new_expression', 'object_creation_expression']);
+const INSTANTIATION_KINDS = new Set(['struct_initializer']);
+
+/** Type-expression node types that indicate a type alias (not a struct/enum/opaque). */
+const TYPE_ALIAS_NODE_TYPES = new Set([
+  'pointer_type', 'fn', 'function_signature', 'builtin_type',
+  'slice_type', 'array_type', 'optional_type', 'error_union_type',
+  'field_expression', 'identifier', 'type_expression', 'primary_type_expression',
+]);
 
 function hasKeyword(node: SyntaxNode, keyword: string): boolean {
   for (let i = 0; i < node.childCount; i++) {
@@ -121,6 +128,21 @@ function walkBodyForCalls(body: SyntaxNode, functionId: string, ctx: ExtractorCo
         }
       }
     } else if (INSTANTIATION_KINDS.has(node.type)) {
+      // struct_initializer: Foo{} or Foo{.x=1} → instantiates Foo
+      const typeId = node.namedChild(0);
+      if (typeId?.type === 'identifier') {
+        const typeName = getNodeText(typeId, ctx.source);
+        if (typeName) {
+          ctx.addUnresolvedReference({
+            fromNodeId: functionId,
+            referenceName: typeName,
+            referenceKind: 'instantiates',
+            line: node.startPosition.row + 1,
+            column: node.startPosition.column,
+          });
+        }
+      }
+    } else if (node.type === 'anonymous_struct_initializer') {
       const typeNode = getChildByField(node, 'type') ?? getChildByField(node, 'constructor') ?? node.namedChild(0);
       if (typeNode) {
         let name = getNodeText(typeNode, ctx.source);
@@ -376,6 +398,25 @@ export const zigExtractor: LanguageExtractor = {
       for (let i = 0; i < node.namedChildCount; i++) {
         if (node.namedChild(i) && findImportBuiltin(node.namedChild(i)!, ctx.source)) return true;
       }
+
+      // Type alias: const Name = type_expression (not a struct/enum/opaque).
+      // e.g. `pub const Callback = *const fn() void;` or `pub const MyInt = i32;`
+      // Distinguished from a regular constant by having exactly 2 named children
+      // (identifier + type expression) with NO value literal (integer/string/call).
+      const VALUE_LITERAL_TYPES = new Set(['integer', 'string', 'float', 'boolean', 'call_expression', 'struct_initializer', 'anonymous_struct_initializer']);
+      if (name && !valueNode && !hasKeyword(node, 'var') && node.namedChildCount === 2) {
+        const second = node.namedChild(1);
+        if (second && TYPE_ALIAS_NODE_TYPES.has(second.type) && !VALUE_LITERAL_TYPES.has(second.type)) {
+          const isPub = hasKeyword(node, 'pub');
+          ctx.createNode('type_alias', name, node, {
+            visibility: isPub ? 'public' : 'private',
+            isExported: isPub,
+            signature: ctx.source.substring(second.startIndex, Math.min(second.endIndex, second.startIndex + 60)).trim(),
+          });
+          return true;
+        }
+      }
+
       return false;
     }
 
