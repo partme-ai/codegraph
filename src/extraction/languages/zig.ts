@@ -44,7 +44,14 @@ function buildFieldChain(node: SyntaxNode, source: string): string {
     return buildFieldChain(object, source) + '.' + memberName;
   }
   const objectName = object ? getNodeText(object, source) : '';
-  if (objectName && memberName) return objectName + '.' + memberName;
+  if (objectName && memberName) {
+    // Skip `self`/`this`/`super` receivers — these are method-call
+    // conventions, not real type names. The bare method name is used
+    // so the resolver can match it against the enclosing container.
+    const SKIP_RECEIVERS = new Set(['self', 'this', 'super']);
+    if (SKIP_RECEIVERS.has(objectName)) return memberName;
+    return objectName + '.' + memberName;
+  }
   return objectName || memberName;
 }
 
@@ -96,6 +103,22 @@ function walkBodyForCalls(body: SyntaxNode, functionId: string, ctx: ExtractorCo
           line: node.startPosition.row + 1,
           column: node.startPosition.column,
         });
+      }
+    } else if (node.type === 'builtin_function') {
+      // @as, @ptrCast, @sizeOf, @intCast, etc. (non-@import builtins)
+      const text = ctx.source.substring(node.startIndex, Math.min(node.endIndex, node.startIndex + 40));
+      if (!/@import\s*\(/.test(text)) {
+        // Extract the builtin name: @foo or @"foo"
+        const m = text.match(/^@[a-zA-Z_]\w*/);
+        if (m) {
+          ctx.addUnresolvedReference({
+            fromNodeId: functionId,
+            referenceName: m[0],
+            referenceKind: 'calls',
+            line: node.startPosition.row + 1,
+            column: node.startPosition.column,
+          });
+        }
       }
     } else if (INSTANTIATION_KINDS.has(node.type)) {
       const typeNode = getChildByField(node, 'type') ?? getChildByField(node, 'constructor') ?? node.namedChild(0);
