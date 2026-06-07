@@ -283,3 +283,194 @@ fn b() void { _ = a(); }
     expect(calls.some((r) => r.referenceName === 'a')).toBe(true);
   });
 });
+
+describe('Zig Chained Method Calls', () => {
+  it('resolves std.debug.print as full chain', () => {
+    const code = `
+const std = @import("std");
+pub fn main() void {
+    std.debug.print("hello\\n", .{});
+}
+`;
+    const result = extractFromSource('chained.zig', code);
+    const calls = result.unresolvedReferences.filter((r) => r.referenceKind === 'calls');
+    expect(calls.some((r) => r.referenceName === 'std.debug.print')).toBe(true);
+  });
+
+  it('resolves std.mem.eql as full chain', () => {
+    const code = `
+const std = @import("std");
+pub fn main() void {
+    _ = std.mem.eql(u8, "a", "b");
+}
+`;
+    const result = extractFromSource('mem.zig', code);
+    const calls = result.unresolvedReferences.filter((r) => r.referenceKind === 'calls');
+    expect(calls.some((r) => r.referenceName === 'std.mem.eql')).toBe(true);
+  });
+
+  it('resolves simple obj.method() correctly', () => {
+    const code = `
+const Foo = struct { pub fn bar(self: *Foo) void { } };
+fn main() void { var f: Foo = undefined; f.bar(); }
+`;
+    const result = extractFromSource('obj.zig', code);
+    const calls = result.unresolvedReferences.filter((r) => r.referenceKind === 'calls');
+    expect(calls.some((r) => r.referenceName === 'f.bar')).toBe(true);
+  });
+
+  it('detects @import("std").testing import inside field expression', () => {
+    const code = `
+const testing = @import("std").testing;
+`;
+    const result = extractFromSource('stdtest.zig', code);
+    const refs = result.unresolvedReferences.filter((r) => r.referenceKind === 'imports');
+    expect(refs.some((r) => r.referenceName === 'std')).toBe(true);
+  });
+});
+
+describe('Zig Test Declarations', () => {
+  it('should extract a test declaration with string name as function', () => {
+    const code = `
+test "basic addition" {
+    _ = add(1, 2);
+}
+`;
+    const result = extractFromSource('test_basic.zig', code);
+    const funcs = result.nodes.filter((n) => n.kind === 'function');
+    expect(funcs.length).toBe(1);
+    expect(funcs[0]?.name).toBe('basic addition');
+  });
+
+  it('should extract a test declaration with identifier name', () => {
+    const code = `
+test addWorks {
+    _ = add(1, 2);
+}
+`;
+    const result = extractFromSource('test_id.zig', code);
+    const funcs = result.nodes.filter((n) => n.kind === 'function');
+    expect(funcs.length).toBe(1);
+    expect(funcs[0]?.name).toBe('addWorks');
+  });
+
+  it('should track calls inside test declarations', () => {
+    const code = `
+fn add(a: i32, b: i32) i32 { return a + b; }
+test "uses add" { _ = add(1, 2); }
+`;
+    const result = extractFromSource('test_calls.zig', code);
+    const calls = result.unresolvedReferences.filter((r) => r.referenceKind === 'calls');
+    expect(calls.some((r) => r.referenceName === 'add')).toBe(true);
+  });
+});
+
+describe('Zig Non-Exhaustive Enum', () => {
+  it('should not extract _ as an enum member', () => {
+    const code = `
+const E = enum(u8) {
+    a = 1,
+    b,
+    _,
+};
+`;
+    const result = extractFromSource('nonexhaustive.zig', code);
+    const members = result.nodes.filter((n) => n.kind === 'enum_member');
+    const names = members.map((m) => m.name);
+    expect(names).toEqual(['a', 'b']);
+    expect(names).not.toContain('_');
+  });
+});
+
+describe('Zig Export Visibility', () => {
+  it('should treat export fn as exported', () => {
+    const code = `
+export fn hello() void { }
+`;
+    const result = extractFromSource('exportfn.zig', code);
+    const funcs = result.nodes.filter((n) => n.kind === 'function');
+    expect(funcs.length).toBe(1);
+    expect(funcs[0]?.isExported).toBe(true);
+    expect(funcs[0]?.visibility).toBe('public');
+  });
+
+  it('should track export fn call from another function', () => {
+    const code = `
+export fn run() void { }
+fn main() void { _ = run(); }
+`;
+    const result = extractFromSource('export_calls.zig', code);
+    const calls = result.unresolvedReferences.filter((r) => r.referenceKind === 'calls');
+    expect(calls.some((r) => r.referenceName === 'run')).toBe(true);
+  });
+});
+
+describe('Zig Comptime Blocks', () => {
+  it('should extract declarations inside comptime blocks', () => {
+    const code = `
+comptime {
+    const version: u32 = 1;
+    var counter: u32 = 0;
+}
+`;
+    const result = extractFromSource('comptime_vars.zig', code);
+    const consts = result.nodes.filter((n) => n.kind === 'constant');
+    const vars = result.nodes.filter((n) => n.kind === 'variable');
+    expect(consts).toHaveLength(1);
+    expect(vars).toHaveLength(1);
+    expect(consts[0]?.name).toBe('version');
+    expect(vars[0]?.name).toBe('counter');
+  });
+});
+
+describe('Zig Packed and Extern Types', () => {
+  it('should extract packed struct', () => {
+    const code = `
+const S = packed struct {
+    x: i32,
+    y: i32,
+};
+`;
+    const result = extractFromSource('packed.zig', code);
+    const structs = result.nodes.filter((n) => n.kind === 'struct');
+    expect(structs.length).toBe(1);
+    expect(structs[0]?.name).toBe('S');
+  });
+
+  it('should extract extern struct', () => {
+    const code = `
+const E = extern struct {
+    id: u32,
+    name: [32]u8,
+};
+`;
+    const result = extractFromSource('extern_struct.zig', code);
+    const structs = result.nodes.filter((n) => n.kind === 'struct');
+    expect(structs.length).toBe(1);
+    expect(structs[0]?.name).toBe('E');
+  });
+});
+
+describe('Zig Threadlocal Variable', () => {
+  it('should extract threadlocal var as variable (not constant)', () => {
+    const code = `
+threadlocal var counter: u32 = 0;
+`;
+    const result = extractFromSource('threadlocal.zig', code);
+    const vars = result.nodes.filter((n) => n.kind === 'variable');
+    expect(vars.length).toBe(1);
+    expect(vars[0]?.name).toBe('counter');
+  });
+});
+
+describe('Zig Usingnamespace', () => {
+  it('should detect @import inside usingnamespace', () => {
+    const code = `
+usingnamespace @import("foo");
+`;
+    const result = extractFromSource('usingns.zig', code);
+    const refs = result.unresolvedReferences.filter((r) => r.referenceKind === 'imports');
+    expect(refs.length).toBeGreaterThanOrEqual(1);
+    expect(refs.some((r) => r.referenceName === 'foo')).toBe(true);
+  });
+});
