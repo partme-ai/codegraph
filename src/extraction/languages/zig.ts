@@ -739,6 +739,63 @@ export const zigExtractor: LanguageExtractor = {
 
   isConst: (node) => hasKeyword(node, 'const'),
 
+  extractImport: (node, source) => {
+    // @import("module") — standalone builtin_function
+    if (node.type === 'builtin_function') {
+      const text = source.substring(node.startIndex, node.endIndex);
+      const m = text.match(/@import\s*\(\s*"([^"]+)"\s*\)/);
+      if (m) return { moduleName: m[1]!, signature: text.trim() };
+    }
+    // variable_declaration wrapping an @import: const std = @import("std");
+    if (node.type === 'variable_declaration') {
+      for (let i = 0; i < node.namedChildCount; i++) {
+        const child = node.namedChild(i);
+        if (!child) continue;
+        const importNode = findImportBuiltin(child, source);
+        if (importNode) {
+          const text = source.substring(importNode.startIndex, importNode.endIndex);
+          const m = text.match(/@import\s*\(\s*"([^"]+)"\s*\)/);
+          if (m) return { moduleName: m[1]!, signature: text.trim() };
+        }
+      }
+    }
+    return null;
+  },
+
+  getReceiverType: (node, source) => {
+    // Zig method convention: first param is `self: *Type` or `self: Type`
+    // Extract the type name from the self parameter.
+    for (let i = 0; i < node.namedChildCount; i++) {
+      const child = node.namedChild(i);
+      if (child?.type !== 'parameters') continue;
+      const firstParam = child.namedChild(0);
+      if (!firstParam) break;
+      // Check if first param name is self/this/super
+      const paramName = firstParam.namedChild(0);
+      if (!paramName || paramName.type !== 'identifier') break;
+      const name = getNodeText(paramName, source);
+      if (name !== 'self' && name !== 'this' && name !== 'super') break;
+      // Extract the type from the param — could be pointer_type (*Type), identifier (Type)
+      for (let j = 1; j < firstParam.namedChildCount; j++) {
+        const typeChild = firstParam.namedChild(j);
+        if (!typeChild) continue;
+        if (typeChild.type === 'pointer_type' || typeChild.type === 'nullable_type') {
+          // *Type or ?*Type — get the inner identifier
+          const inner = typeChild.namedChild(0);
+          if (inner?.type === 'pointer_type') {
+            // ?*Type — nullable wrapping pointer
+            const deepest = inner.namedChild(0);
+            if (deepest?.type === 'identifier') return getNodeText(deepest, source);
+          }
+          if (inner?.type === 'identifier') return getNodeText(inner, source);
+        }
+        if (typeChild.type === 'identifier') return getNodeText(typeChild, source);
+      }
+      break;
+    }
+    return undefined;
+  },
+
   getSignature: (node, source) => extractFnSignature(node, source),
 
   extractModifiers: (node) => {

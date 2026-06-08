@@ -962,3 +962,61 @@ extern fn printf(fmt: [*:0]const u8, ...) c_int;
     expect(funcs.length).toBeGreaterThanOrEqual(1);
   });
 });
+
+describe('Zig getReceiverType (standardized method receiver)', () => {
+  it('should extract receiver type from self: *Type parameter', () => {
+    const code = `
+const Counter = struct {
+    count: u32,
+    pub fn increment(self: *Counter) void {
+        self.count += 1;
+    }
+};
+`;
+    const result = extractFromSource('receiver.zig', code);
+    const methods = result.nodes.filter((n) => n.kind === 'method');
+    const inc = methods.find((m) => m.name === 'increment');
+    expect(inc).toBeDefined();
+  });
+
+  it('should extract receiver type from self: Type parameter', () => {
+    const code = `
+const Point = struct {
+    x: f64,
+    pub fn distance(self: Point) f64 {
+        return self.x * self.x;
+    }
+};
+`;
+    const result = extractFromSource('receiver2.zig', code);
+    const methods = result.nodes.filter((n) => n.kind === 'method');
+    expect(methods.some((m) => m.name === 'distance')).toBe(true);
+  });
+});
+
+describe('Zig extractImport hook (standardized)', () => {
+  it('should handle @import via extractImport hook for variable declarations', () => {
+    const code = `
+const std = @import("std");
+const testing = @import("std").testing;
+`;
+    const result = extractFromSource('import_hook.zig', code);
+    const refs = result.unresolvedReferences.filter((r) => r.referenceKind === 'imports');
+    expect(refs.some((r) => r.referenceName === 'std')).toBe(true);
+  });
+});
+
+describe('Zig Comptime Parameter Detection', () => {
+  it('should detect comptime parameters on functions', () => {
+    const code = `
+fn print(comptime fmt: []const u8, args: anytype) void {
+    _ = fmt;
+    _ = args;
+}
+`;
+    const result = extractFromSource('comptime_param.zig', code);
+    const funcs = result.nodes.filter((n) => n.kind === 'function');
+    expect(funcs.length).toBe(1);
+    expect(funcs[0]?.name).toBe('print');
+  });
+});
