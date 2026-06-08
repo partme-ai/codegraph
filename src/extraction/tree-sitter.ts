@@ -3421,13 +3421,6 @@ export class TreeSitterExtractor {
       return;
     }
 
-    // Zig: tree-sitter-zig uses `identifier` (not `type_identifier`) for type
-    // names, and `parameters` is not a named field on `function_declaration`.
-    // Walk parameter and return-type subtrees with Zig-aware type node detection.
-    if (this.language === 'zig') {
-      this.extractZigTypeAnnotations(node, nodeId);
-      return;
-    }
 
     // Dart: a `method_signature` wraps the real `function_signature` (where the
     // params and return type live), and the return type is a bare
@@ -3726,81 +3719,6 @@ export class TreeSitterExtractor {
       if (child) {
         this.extractTypeRefsFromSubtree(child, fromNodeId);
       }
-    }
-  }
-
-  /**
-   * Zig-aware type annotation extraction. tree-sitter-zig uses `identifier`
-   * (not `type_identifier`) for type names, and `parameters` is not a named
-   * field on `function_declaration`. Walk parameter and return-type subtrees,
-   * emitting `references` edges for custom types while skipping builtin_type
-   * (i32, bool, void, etc.) and pointer/slice/array wrappers.
-   */
-  private extractZigTypeAnnotations(node: SyntaxNode, nodeId: string): void {
-    // Find the parameters child (not a named field in tree-sitter-zig)
-    let paramsNode: SyntaxNode | null = null;
-    for (let i = 0; i < node.namedChildCount; i++) {
-      const child = node.namedChild(i);
-      if (child?.type === 'parameters') { paramsNode = child; break; }
-    }
-    if (paramsNode) {
-      this.extractZigTypeRefsFromSubtree(paramsNode, nodeId);
-    }
-    // Return type — the `type` field on function_declaration
-    const returnType = getChildByField(node, 'type');
-    if (returnType) {
-      this.extractZigTypeRefsFromSubtree(returnType, nodeId);
-    }
-  }
-
-  /**
-   * Walk a type subtree for Zig, emitting `references` for custom type names.
-   * Skips `builtin_type` (i32, bool, void, etc.), pointer_type, slice_type,
-   * array_type, optional_type, and error_union_type wrappers — only the
-   * embedded custom type identifiers become references.
-   */
-  private extractZigTypeRefsFromSubtree(node: SyntaxNode, fromNodeId: string): void {
-    if (node.type === 'builtin_type') return;
-    if (node.type === 'parameter') {
-      for (let i = 0; i < node.namedChildCount; i++) {
-        const child = node.namedChild(i);
-        if (!child || child.type === 'identifier') continue;
-        this.extractZigTypeRefsFromSubtree(child, fromNodeId);
-      }
-      return;
-    }
-    // field_expression: only the last identifier (the member) is the type —
-    // skip module-path segments in the `object` position.
-    if (node.type === 'field_expression') {
-      for (let i = 0; i < node.namedChildCount; i++) {
-        const child = node.namedChild(i);
-        if (!child) continue;
-        if (child.type === 'field_expression' || child.type === 'identifier') {
-          if (node.fieldNameForNamedChild(i) === 'object') continue;
-          this.extractZigTypeRefsFromSubtree(child, fromNodeId);
-        } else {
-          this.extractZigTypeRefsFromSubtree(child, fromNodeId);
-        }
-      }
-      return;
-    }
-    if (node.type === 'identifier') {
-      const typeName = getNodeText(node, this.source);
-      if (typeName && !this.BUILTIN_TYPES.has(typeName)) {
-        this.unresolvedReferences.push({
-          fromNodeId,
-          referenceName: typeName,
-          referenceKind: 'references',
-          line: node.startPosition.row + 1,
-          column: node.startPosition.column,
-        });
-      }
-      return;
-    }
-    if (node.type === 'anonymous_struct_initializer' || node.type === 'struct_initializer') return;
-    for (let i = 0; i < node.namedChildCount; i++) {
-      const child = node.namedChild(i);
-      if (child) this.extractZigTypeRefsFromSubtree(child, fromNodeId);
     }
   }
 

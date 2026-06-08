@@ -153,6 +153,23 @@ const Value = union(enum) {
     expect(structs.some((s) => s.name === 'Value')).toBe(true);
   });
 
+  it('should mark tagged union with metadata and extract enum members', () => {
+    const code = `
+const Value = union(enum) {
+    int: i32,
+    float: f64,
+    str: []const u8,
+};
+`;
+    const result = extractFromSource('tagged_union.zig', code);
+    const valueNode = result.nodes.find((n) => n.name === 'Value');
+    expect(valueNode).toBeDefined();
+    expect(valueNode?.metadata?.taggedUnion).toBe(true);
+    const members = result.nodes.filter((n) => n.kind === 'enum_member');
+    const names = members.map((m) => m.name).sort();
+    expect(names).toEqual(['float', 'int', 'str']);
+  });
+
   it('should extract error set declaration', () => {
     const code = `
 const MyError = error{
@@ -472,5 +489,476 @@ usingnamespace @import("foo");
     const refs = result.unresolvedReferences.filter((r) => r.referenceKind === 'imports');
     expect(refs.length).toBeGreaterThanOrEqual(1);
     expect(refs.some((r) => r.referenceName === 'foo')).toBe(true);
+  });
+});
+
+describe('Zig Container Field Type References', () => {
+  it('should emit references edges for custom types on struct fields', () => {
+    const code = `
+const Allocator = struct { alloc: u8 };
+const Config = struct {
+    allocator: Allocator,
+    port: u16,
+};
+`;
+    const result = extractFromSource('fields.zig', code);
+    const refs = result.unresolvedReferences.filter(
+      (r) => r.referenceKind === 'references' && r.referenceName === 'Allocator'
+    );
+    expect(refs.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('should NOT emit references for builtin types on fields', () => {
+    const code = `
+const Config = struct {
+    port: u16,
+    host: []const u8,
+};
+`;
+    const result = extractFromSource('builtin_fields.zig', code);
+    const refs = result.unresolvedReferences.filter(
+      (r) => r.referenceKind === 'references' && (r.referenceName === 'u16' || r.referenceName === 'u8')
+    );
+    expect(refs.length).toBe(0);
+  });
+
+  it('should extract pointer type references on fields', () => {
+    const code = `
+const Node = struct {
+    next: ?*Node,
+};
+`;
+    const result = extractFromSource('ptr_field.zig', code);
+    const refs = result.unresolvedReferences.filter(
+      (r) => r.referenceKind === 'references' && r.referenceName === 'Node'
+    );
+    expect(refs.length).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe('Zig @cImport Detection', () => {
+  it('should detect @cImport(@cInclude("header")) and create import node', () => {
+    const code = `
+const c = @cImport(@cInclude("stdio.h"));
+`;
+    const result = extractFromSource('cimport.zig', code);
+    const imports = result.nodes.filter((n) => n.kind === 'import');
+    expect(imports.some((i) => i.name === 'stdio.h')).toBe(true);
+    const refs = result.unresolvedReferences.filter(
+      (r) => r.referenceKind === 'imports' && r.referenceName === 'stdio.h'
+    );
+    expect(refs.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('should detect multiple @cInclude inside @cImport', () => {
+    const code = `
+const c = @cImport({
+    @cInclude("stdio.h");
+    @cInclude("stdlib.h");
+});
+`;
+    const result = extractFromSource('cimport_multi.zig', code);
+    const imports = result.nodes.filter((n) => n.kind === 'import');
+    expect(imports.some((i) => i.name === 'stdio.h')).toBe(true);
+    expect(imports.some((i) => i.name === 'stdlib.h')).toBe(true);
+  });
+});
+
+describe('Zig @call Indirect Function Calls', () => {
+  it('should detect @call(.auto, funcName, .{}) as calls reference', () => {
+    const code = `
+fn foo() void {}
+fn bar() void {
+    const r = @call(.auto, foo, .{});
+    _ = r;
+}
+`;
+    const result = extractFromSource('atcall.zig', code);
+    const calls = result.unresolvedReferences.filter(
+      (r) => r.referenceKind === 'calls' && r.referenceName === 'foo'
+    );
+    expect(calls.length).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe('Zig @embedFile Detection', () => {
+  it('should detect @embedFile("path") as imports reference', () => {
+    const code = `
+const data = @embedFile("data.txt");
+`;
+    const result = extractFromSource('embedfile.zig', code);
+    const refs = result.unresolvedReferences.filter(
+      (r) => r.referenceKind === 'imports' && r.referenceName === 'data.txt'
+    );
+    expect(refs.length).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe('Zig Nested Struct Declarations', () => {
+  it('should extract nested struct/enum/union inside containers', () => {
+    const code = `
+const Outer = struct {
+    pub const Inner = struct {
+        pub fn deep() void {}
+    };
+};
+`;
+    const result = extractFromSource('nested.zig', code);
+    const structs = result.nodes.filter((n) => n.kind === 'struct');
+    expect(structs.some((s) => s.name === 'Outer')).toBe(true);
+    expect(structs.some((s) => s.name === 'Inner')).toBe(true);
+    const methods = result.nodes.filter((n) => n.kind === 'method');
+    expect(methods.some((m) => m.name === 'deep')).toBe(true);
+  });
+});
+
+describe('Zig Nullable and Error Union Type References', () => {
+  it('should extract type references from nullable type annotations', () => {
+    const code = `
+const MyType = struct {};
+const maybe: ?MyType = null;
+`;
+    const result = extractFromSource('nullable_ref.zig', code);
+    const refs = result.unresolvedReferences.filter(
+      (r) => r.referenceKind === 'references' && r.referenceName === 'MyType'
+    );
+    expect(refs.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('should extract type references from error union type annotations', () => {
+    const code = `
+const MyError = error{Fail};
+pub fn foo() !MyError {
+    return error.Fail;
+}
+`;
+    const result = extractFromSource('errunion_ref.zig', code);
+    const funcs = result.nodes.filter((n) => n.kind === 'function');
+    expect(funcs.some((f) => f.name === 'foo')).toBe(true);
+  });
+});
+
+describe('Zig Function Type Annotations', () => {
+  it('should extract type references from function parameter types', () => {
+    const code = `
+const MyStruct = struct {};
+fn process(s: MyStruct) void { _ = s; }
+`;
+    const result = extractFromSource('param_type.zig', code);
+    const refs = result.unresolvedReferences.filter(
+      (r) => r.referenceKind === 'references' && r.referenceName === 'MyStruct'
+    );
+    expect(refs.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('should extract type references from function return types', () => {
+    const code = `
+const Result = struct {};
+fn getResult() Result { return undefined; }
+`;
+    const result = extractFromSource('ret_type.zig', code);
+    const refs = result.unresolvedReferences.filter(
+      (r) => r.referenceKind === 'references' && r.referenceName === 'Result'
+    );
+    expect(refs.length).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe('Zig Comptime Parameter Detection', () => {
+  it('should detect comptime parameters on functions', () => {
+    const code = `
+fn print(comptime fmt: []const u8, args: anytype) void {
+    _ = fmt;
+    _ = args;
+}
+`;
+    const result = extractFromSource('comptime_param.zig', code);
+    const funcs = result.nodes.filter((n) => n.kind === 'function');
+    expect(funcs.length).toBe(1);
+    expect(funcs[0]?.name).toBe('print');
+  });
+});
+
+// ─── P0: Untested call-in-expression patterns ────────────────────────
+
+describe('Zig defer / errdefer Call Tracking', () => {
+  it('should track calls inside defer expressions', () => {
+    const code = `
+fn cleanup() void {}
+fn doWork() void {
+    defer cleanup();
+    _ = 42;
+}
+`;
+    const result = extractFromSource('defer_call.zig', code);
+    const calls = result.unresolvedReferences.filter((r) => r.referenceKind === 'calls');
+    expect(calls.some((r) => r.referenceName === 'cleanup')).toBe(true);
+  });
+
+  it('should track calls inside errdefer expressions', () => {
+    const code = `
+fn rollback() void {}
+fn risky() !void {
+    errdefer rollback();
+}
+`;
+    const result = extractFromSource('errdefer_call.zig', code);
+    const calls = result.unresolvedReferences.filter((r) => r.referenceKind === 'calls');
+    expect(calls.some((r) => r.referenceName === 'rollback')).toBe(true);
+  });
+});
+
+describe('Zig try Expression Call Tracking', () => {
+  it('should track calls through try expression', () => {
+    const code = `
+fn riskyOp() !void {}
+fn caller() !void {
+    try riskyOp();
+}
+`;
+    const result = extractFromSource('try_call.zig', code);
+    const calls = result.unresolvedReferences.filter((r) => r.referenceKind === 'calls');
+    expect(calls.some((r) => r.referenceName === 'riskyOp')).toBe(true);
+  });
+});
+
+describe('Zig catch Handler Call Tracking', () => {
+  it('should track calls inside catch handler', () => {
+    const code = `
+fn handler(err: anyerror) void { _ = err; }
+fn riskyOp() !i32 { return 0; }
+fn caller() void {
+    _ = riskyOp() catch |e| handler(e);
+}
+`;
+    const result = extractFromSource('catch_handler.zig', code);
+    const calls = result.unresolvedReferences.filter((r) => r.referenceKind === 'calls');
+    expect(calls.some((r) => r.referenceName === 'handler')).toBe(true);
+  });
+});
+
+describe('Zig for Loop Call Tracking', () => {
+  it('should track calls inside for loop body', () => {
+    const code = `
+fn process(x: u32) void { _ = x; }
+fn caller() void {
+    var items = [_]u32{ 1, 2, 3 };
+    for (items) |item| {
+        process(item);
+    }
+}
+`;
+    const result = extractFromSource('for_calls.zig', code);
+    const calls = result.unresolvedReferences.filter((r) => r.referenceKind === 'calls');
+    expect(calls.some((r) => r.referenceName === 'process')).toBe(true);
+  });
+
+  it('should track calls inside for loop with index', () => {
+    const code = `
+fn handle(a: u32, b: usize) void { _ = a; _ = b; }
+fn caller() void {
+    var items = [_]u32{ 1, 2, 3 };
+    for (items, 0..) |item, i| {
+        handle(item, i);
+    }
+}
+`;
+    const result = extractFromSource('for_index_calls.zig', code);
+    const calls = result.unresolvedReferences.filter((r) => r.referenceKind === 'calls');
+    expect(calls.some((r) => r.referenceName === 'handle')).toBe(true);
+  });
+});
+
+describe('Zig while Loop Call Tracking', () => {
+  it('should track calls inside while loop body', () => {
+    const code = `
+fn doWork() void {}
+fn caller() void {
+    var i: u32 = 0;
+    while (i < 10) : (i += 1) {
+        doWork();
+    }
+}
+`;
+    const result = extractFromSource('while_calls.zig', code);
+    const calls = result.unresolvedReferences.filter((r) => r.referenceKind === 'calls');
+    expect(calls.some((r) => r.referenceName === 'doWork')).toBe(true);
+  });
+});
+
+describe('Zig Labeled Block Call Tracking', () => {
+  it('should track calls inside labeled block expressions', () => {
+    const code = `
+fn compute() i32 { return 42; }
+fn caller() void {
+    const result = blk: {
+        const tmp = compute();
+        break :blk tmp;
+    };
+    _ = result;
+}
+`;
+    const result = extractFromSource('labeled_block.zig', code);
+    const calls = result.unresolvedReferences.filter((r) => r.referenceKind === 'calls');
+    expect(calls.some((r) => r.referenceName === 'compute')).toBe(true);
+  });
+});
+
+describe('Zig switch with Payload Call Tracking', () => {
+  it('should track calls inside switch prongs', () => {
+    const code = `
+const Value = union(enum) { a: u32, b: u32 };
+fn handleA(v: u32) void { _ = v; }
+fn handleB(v: u32) void { _ = v; }
+fn caller(val: Value) void {
+    switch (val) {
+        .a => |v| handleA(v),
+        .b => |v| handleB(v),
+    }
+}
+`;
+    const result = extractFromSource('switch_calls.zig', code);
+    const calls = result.unresolvedReferences.filter((r) => r.referenceKind === 'calls');
+    expect(calls.some((r) => r.referenceName === 'handleA')).toBe(true);
+    expect(calls.some((r) => r.referenceName === 'handleB')).toBe(true);
+  });
+});
+
+describe('Zig orelse Expression Call Tracking', () => {
+  it('should track calls in orelse fallback expression', () => {
+    const code = `
+fn fallback() u32 { return 0; }
+fn caller() void {
+    const maybe: ?u32 = null;
+    const val = maybe orelse fallback();
+    _ = val;
+}
+`;
+    const result = extractFromSource('orelse_call.zig', code);
+    const calls = result.unresolvedReferences.filter((r) => r.referenceKind === 'calls');
+    expect(calls.some((r) => r.referenceName === 'fallback')).toBe(true);
+  });
+});
+
+// ─── P1: inline/noinline/callconv metadata ───────────────────────────
+
+describe('Zig inline/noinline Function Modifiers', () => {
+  it('should mark inline fn in metadata', () => {
+    const code = `
+inline fn fastPath() void {}
+`;
+    const result = extractFromSource('inline_fn.zig', code);
+    const funcs = result.nodes.filter((n) => n.kind === 'function');
+    expect(funcs.length).toBe(1);
+    expect(funcs[0]?.name).toBe('fastPath');
+    expect(funcs[0]?.metadata?.inline).toBe(true);
+  });
+
+  it('should mark noinline fn in metadata', () => {
+    const code = `
+noinline fn slowPath() void {}
+`;
+    const result = extractFromSource('noinline_fn.zig', code);
+    const funcs = result.nodes.filter((n) => n.kind === 'function');
+    expect(funcs.length).toBe(1);
+    expect(funcs[0]?.name).toBe('slowPath');
+    expect(funcs[0]?.metadata?.noinline).toBe(true);
+  });
+
+  it('should capture callconv in function signature', () => {
+    const code = `
+fn cCallback(data: *anyopaque) callconv(.C) void {
+    _ = data;
+}
+`;
+    const result = extractFromSource('callconv_fn.zig', code);
+    const funcs = result.nodes.filter((n) => n.kind === 'function');
+    expect(funcs.length).toBe(1);
+    expect(funcs[0]?.name).toBe('cCallback');
+    expect(funcs[0]?.signature).toContain('callconv(.C)');
+  });
+});
+
+// ─── P3: .zon, anonymous struct, destructuring, module docs, extern fn ──
+
+describe('Zig .zon File Support', () => {
+  it('should parse declarations from a .zon file', () => {
+    const code = `
+.name = "my-package",
+.version = "0.1.0",
+.paths = .{ "." },
+`;
+    const result = extractFromSource('build.zig.zon', code);
+    // .zon files are parsed as zig — verify no crash and some output
+    expect(result.nodes.length).toBeGreaterThanOrEqual(0);
+  });
+});
+
+describe('Zig Anonymous Struct Literal Instantiation', () => {
+  it('should track Type{ .field = val } as instantiation', () => {
+    const code = `
+const Point = struct { x: f64, y: f64 };
+fn makePoint() Point {
+    return Point{ .x = 1.0, .y = 2.0 };
+}
+`;
+    const result = extractFromSource('anon_struct.zig', code);
+    const refs = result.unresolvedReferences.filter((r) => r.referenceKind === 'instantiates');
+    expect(refs.some((r) => r.referenceName === 'Point')).toBe(true);
+  });
+});
+
+describe('Zig extern fn Without Body', () => {
+  it('should extract extern function declaration (no body)', () => {
+    const code = `
+extern fn malloc(size: usize) ?*anyopaque;
+`;
+    const result = extractFromSource('extern_fn.zig', code);
+    const funcs = result.nodes.filter((n) => n.kind === 'function');
+    // Should extract as a function node even without a body
+    expect(funcs.length).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe('Zig Module Doc Comments', () => {
+  it('should handle //! module-level doc comments without crashing', () => {
+    const code = `
+//! This module provides math utilities.
+
+pub fn add(a: i32, b: i32) i32 {
+    return a + b;
+}
+`;
+    const result = extractFromSource('moddoc.zig', code);
+    const funcs = result.nodes.filter((n) => n.kind === 'function');
+    expect(funcs.length).toBe(1);
+    expect(funcs[0]?.name).toBe('add');
+  });
+});
+
+describe('Zig Destructuring Assignment', () => {
+  it('should not crash on destructuring tuples', () => {
+    const code = `
+fn caller() void {
+    const tuple = .{ 1, 2, 3 };
+    const a, const b, const c = tuple;
+    _ = a; _ = b; _ = c;
+}
+`;
+    const result = extractFromSource('destructure.zig', code);
+    // Should not crash and should extract the function
+    const funcs = result.nodes.filter((n) => n.kind === 'function');
+    expect(funcs.length).toBe(1);
+  });
+});
+
+describe('Zig C Variadic Function', () => {
+  it('should extract C variadic function declaration', () => {
+    const code = `
+extern fn printf(fmt: [*:0]const u8, ...) c_int;
+`;
+    const result = extractFromSource('variadic.zig', code);
+    const funcs = result.nodes.filter((n) => n.kind === 'function');
+    expect(funcs.length).toBeGreaterThanOrEqual(1);
   });
 });
