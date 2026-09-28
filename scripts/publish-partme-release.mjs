@@ -69,7 +69,15 @@ for (const batch of [reports.slice(0,-1),reports.slice(-1)]) {
      assert.equal(existing.dist.integrity,p.integrity,`Existing package differs: ${p.name}`);
      console.log(`Already published and verified: ${p.name}@${version}`);
    } else {
-     run('npm',['publish',path.join(out,p.filename),'--access','public','--tag','latest','--provenance','--loglevel=warn'],{stdio:'inherit'});
+     try {
+       console.log(run('npm',['publish',path.join(out,p.filename),'--access','public','--tag','latest','--provenance','--loglevel=warn'],{stdio:['ignore','pipe','pipe']}));
+     } catch(error) {
+       // A prior successful upload may be immutable at the write endpoint
+       // before registry reads can see it. Only this precise conflict can
+       // proceed to readback; permission/authentication errors still fail.
+       if(!String(error.stderr).includes('You cannot publish over the previously published versions'))throw error;
+       console.log(`Registry already has an immutable version; awaiting integrity verification: ${p.name}@${version}`);
+     }
    }
  }
  const pending=new Map(batch.map(p=>[p.name,p]));
