@@ -29,6 +29,23 @@ export function generateNodeId(
   return `${kind}:${hash}`;
 }
 
+/** Per-extraction identities: preserve legacy IDs unless distinct source positions collide. */
+export class NodeIdAllocator {
+  private firstColumns = new Map<string, number>();
+
+  generate(filePath: string, kind: NodeKind, name: string, line: number, column: number): string {
+    const id = generateNodeId(filePath, kind, name, line);
+    const firstColumn = this.firstColumns.get(id);
+    if (firstColumn === undefined) {
+      this.firstColumns.set(id, column);
+      return id;
+    }
+    // Columns are zero-based UTF-16 code units in both wasm and the kernel.
+    // Revisiting the same declaration must still produce the same identity.
+    return firstColumn === column ? id : `${id}:${column}`;
+  }
+}
+
 /**
  * Extract text from a syntax node
  */
@@ -84,6 +101,7 @@ function cleanCommentMarkers(comment: string): string {
     .replace(/^\/\/[/!]?\s?/gm, '') // // , and Rust/Swift doc lines /// //!
     .replace(/^--\s?/gm, '') //        Lua/Luau line comments
     .replace(/^#\s?/gm, '') //         Python/Ruby/shell line comments
+    .replace(/^%+\s?/gm, '') //        Erlang line comments (% / %% / %%%)
     .replace(/^\s*\*\s?/gm, '') //     block-comment continuation (* foo)
     .trim();
 }

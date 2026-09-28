@@ -8,7 +8,7 @@
  * showing nothing. Deterministic, query-time only, no graph mutation, and a
  * fully connected flow must never produce the section.
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
@@ -149,6 +149,25 @@ describe('codegraph_explore — dynamic boundaries', () => {
     if (testDir && fs.existsSync(testDir)) fs.rmSync(testDir, { recursive: true, force: true });
   });
 
+  it('announces a template import boundary from indexed source (#1967)', async () => {
+    await setup({
+      'loader.ts': [
+        'export async function loadLocale(lang: string) {',
+        '  return import(`./locales/${lang}.js`);',
+        '}',
+      ].join('\n'),
+      'locale.ts': 'export function translate() { return "hello"; }',
+    }, ['**/*.ts']);
+
+    const res = await handler.execute('codegraph_explore', { query: 'loadLocale translate' });
+    const text = res.content[0].text as string;
+    expect(res.isError).not.toBe(true);
+    expect(text).toContain('**Dynamic boundaries');
+    expect(text).toContain('dynamic import');
+    expect(text).toMatch(/loader\.ts:2/);
+    expect(text).not.toContain('candidates for key');
+  });
+
   it('announces the boundary site and shortlists the keyed candidate', async () => {
     await setup({
       'router.ts': [
@@ -171,7 +190,7 @@ describe('codegraph_explore — dynamic boundaries', () => {
     const res = await handler.execute('codegraph_explore', { query: 'routeSave onSave' });
     const text = res.content[0].text as string;
 
-    expect(text).toContain('## Dynamic boundaries');
+    expect(text).toContain('**Dynamic boundaries');
     expect(text).toContain('computed member call');
     expect(text).toMatch(/router\.ts:6/); // the exact dispatch site
     expect(text).toContain('candidates for key `save`');
@@ -199,7 +218,7 @@ describe('codegraph_explore — dynamic boundaries', () => {
     const res = await handler.execute('codegraph_explore', { query: 'route onSave' });
     const text = res.content[0].text as string;
 
-    expect(text).toContain('## Dynamic boundaries');
+    expect(text).toContain('**Dynamic boundaries');
     expect(text).toContain('computed member call');
     expect(text).not.toContain('candidates for key'); // runtime key → no shortlist to claim
   });
@@ -221,7 +240,7 @@ describe('codegraph_explore — dynamic boundaries', () => {
     // `processPayment` does not exist anywhere — only `route` resolves.
     const res = await handler.execute('codegraph_explore', { query: 'route processPayment' });
     const text = res.content[0].text as string;
-    expect(text).toContain('## Dynamic boundaries');
+    expect(text).toContain('**Dynamic boundaries');
   });
 
   it('renders a direct synthesized emit→handler hop as a dynamic-dispatch link (#687 criterion 1)', async () => {
@@ -254,11 +273,11 @@ describe('codegraph_explore — dynamic boundaries', () => {
     const res = await handler.execute('codegraph_explore', { query: 'completeCheckout settleInvoice' });
     const text = res.content[0].text as string;
 
-    expect(text).toContain('## Dynamic-dispatch links among your symbols');
+    expect(text).toContain('**Dynamic-dispatch links among your symbols');
     expect(text).toMatch(/completeCheckout → settleInvoice/);
     expect(text).toContain('invoice.settled');
     // Connected via the synthesized edge — no boundary to announce.
-    expect(text).not.toContain('## Dynamic boundaries');
+    expect(text).not.toContain('**Dynamic boundaries');
   });
 
   it('never adds the section to a fully connected flow', async () => {
@@ -272,8 +291,8 @@ describe('codegraph_explore — dynamic boundaries', () => {
 
     const res = await handler.execute('codegraph_explore', { query: 'stepOne stepThree' });
     const text = res.content[0].text as string;
-    expect(text).toContain('## Flow');
-    expect(text).not.toContain('## Dynamic boundaries');
+    expect(text).toContain('**Flow');
+    expect(text).not.toContain('**Dynamic boundaries');
   });
 
   it('python getattr dispatch surfaces with a prefix-key candidate', async () => {
@@ -292,8 +311,201 @@ describe('codegraph_explore — dynamic boundaries', () => {
     const res = await handler.execute('codegraph_explore', { query: 'process handle_save' });
     const text = res.content[0].text as string;
 
-    expect(text).toContain('## Dynamic boundaries');
+    expect(text).toContain('**Dynamic boundaries');
     expect(text).toContain('getattr');
     expect(text).toContain('handle_save');
   });
+});
+
+// ---------------------------------------------------------------------------
+// Integration: interface/registry dispatch (a named method has many impls)
+// ---------------------------------------------------------------------------
+
+describe('codegraph_explore — interface dispatch', () => {
+  let testDir: string;
+  let cg: CodeGraph;
+  let handler: ToolHandler;
+
+  const setup = async (files: Record<string, string>, include: string[]) => {
+    testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codegraph-iface-'));
+    const src = path.join(testDir, 'src');
+    fs.mkdirSync(src, { recursive: true });
+    for (const [name, content] of Object.entries(files)) {
+      fs.writeFileSync(path.join(src, name), content);
+    }
+    cg = CodeGraph.initSync(testDir, { config: { include, exclude: [] } });
+    await cg.indexAll();
+    handler = new ToolHandler(cg);
+  };
+
+  afterEach(() => {
+    if (cg) cg.destroy();
+    if (testDir && fs.existsSync(testDir)) fs.rmSync(testDir, { recursive: true, force: true });
+  });
+
+  // 9 classes implement INodeType, each with execute(); a runtime registry lookup
+  // dispatches to one. The agent names the static entry + `execute`, which can't
+  // resolve to a single impl — the boundary IS the answer.
+  const nodeFamily = (n: number) => {
+    const names = ['Http', 'Set', 'If', 'Merge', 'Code', 'Webhook', 'Cron', 'Func', 'NoOp', 'Switch', 'Wait', 'Filter'];
+    return [
+      'export interface INodeType { execute(): unknown; }',
+      ...names.slice(0, n).map((nm, i) => `export class ${nm}Node implements INodeType { execute() { return ${i}; } }`),
+    ].join('\n');
+  };
+  const engine = [
+    "import { registry } from './registry';",
+    'export class WorkflowExecute {',
+    '  processRunExecutionData() { return this.runNode(); }',
+    '  runNode() { return this.executeNode(); }',
+    '  executeNode() {',
+    "    const nodeType = registry.get('http');",
+    '    return nodeType.execute();',
+    '  }',
+    '}',
+  ].join('\n');
+  const registry = [
+    "import type { INodeType } from './nodes';",
+    'class Registry {',
+    '  private m: Record<string, INodeType> = {};',
+    '  get(k: string): INodeType { return this.m[k]!; }',
+    '}',
+    'export const registry = new Registry();',
+  ].join('\n');
+
+  it('announces the interface, the TRUE implementer count, and sample targets', async () => {
+    await setup({ 'nodes.ts': nodeFamily(9), 'registry.ts': registry, 'engine.ts': engine }, ['**/*.ts']);
+
+    const res = await handler.execute('codegraph_explore', { query: 'processRunExecutionData executeNode execute' });
+    const text = res.content[0].text as string;
+
+    expect(text).toContain('**Interface dispatch (a named method has many implementations)');
+    expect(text).toMatch(/`execute` → runtime dispatch to \*\*9\*\* types implementing `INodeType`/);
+    // a couple of concrete targets, with file:line
+    expect(text).toMatch(/\b\w+Node\.execute` \(/);
+    // never steer to Read
+    expect(text).not.toMatch(/\buse Read\b/i);
+  });
+
+  it('stays SILENT on a fully connected flow with no polymorphic family', async () => {
+    await setup({
+      'pipeline.ts': [
+        'export function stepOne() { return stepTwo(); }',
+        'export function stepTwo() { return stepThree(); }',
+        'export function stepThree() { return 3; }',
+      ].join('\n'),
+    }, ['**/*.ts']);
+
+    const res = await handler.execute('codegraph_explore', { query: 'stepOne stepThree' });
+    const text = res.content[0].text as string;
+    expect(text).toContain('**Flow');
+    expect(text).not.toContain('**Interface dispatch');
+  });
+
+  // vscode shape: many unrelated classes share a lifecycle base and happen to
+  // share a member name the base never declares. That is not dispatch through
+  // the base — announcing it put "runtime dispatch to 2706 types implementing
+  // Disposable" at the top of every answer whose query said "extension".
+  const lifecycleFamily = () => {
+    const names = ['Editor', 'Terminal', 'Search', 'Debug', 'Scm', 'Chat', 'Notebook', 'Output', 'Tasks', 'Remote'];
+    return [
+      'export abstract class Disposable { dispose(): void {} }',
+      ...names.map((nm, i) => [
+        `export class ${nm}Service extends Disposable {`,
+        `  get extension(): string { return '${nm.toLowerCase()}'; }`,
+        `  dispose(): void { super.dispose(); }`,
+        `  describe${nm}() { return this.extension + ${i}; }`,
+        '}',
+      ].join('\n')),
+    ].join('\n');
+  };
+
+  it('stays SILENT for a shared name the common base never declares', async () => {
+    await setup({ 'services.ts': lifecycleFamily() }, ['**/*.ts']);
+    const res = await handler.execute('codegraph_explore', { query: 'extension describeEditor describeChat' });
+    const text = res.content[0].text as string;
+    expect(text).not.toMatch(/`extension` → runtime dispatch/);
+  });
+
+  it('still announces a member the common base declares', async () => {
+    await setup({ 'services.ts': lifecycleFamily() }, ['**/*.ts']);
+    const res = await handler.execute('codegraph_explore', { query: 'dispose describeEditor describeChat' });
+    const text = res.content[0].text as string;
+    expect(text).toMatch(/`dispose` → runtime dispatch to \*\*10\*\* types implementing `Disposable`/);
+  });
+
+  it('stays SILENT when the interface family is below the polymorphism threshold (3 impls)', async () => {
+    await setup({ 'nodes.ts': nodeFamily(3), 'registry.ts': registry, 'engine.ts': engine }, ['**/*.ts']);
+
+    const res = await handler.execute('codegraph_explore', { query: 'processRunExecutionData executeNode execute' });
+    const text = res.content[0].text as string;
+    expect(text).not.toContain('**Interface dispatch');
+  });
+});
+
+describe('scanDynamicDispatch — dynamic import arguments (#1967)', () => {
+  const forms = (body: string): string[] =>
+    scanDynamicDispatch(body, 'typescript', 1).map((m) => m.form);
+
+  it('flags an import built from a template literal with a substitution', () => {
+    expect(forms('async function load(lang) {\n  return import(`./locales/${lang}.js`);\n}')).toEqual(['dynamic-import']);
+    expect(forms('function load(name) {\n  return require(`./plugins/${name}`);\n}')).toEqual(['dynamic-import']);
+  });
+
+  it('flags an import built by string concatenation', () => {
+    expect(forms("async function load(lang) {\n  return import('./locales/' + lang + '.js');\n}")).toEqual(['dynamic-import']);
+    expect(forms('function load(dir) {\n  return require(dir + "/index");\n}')).toEqual(['dynamic-import']);
+  });
+
+  it('still flags an import of a bare expression', () => {
+    expect(forms('async function load(p) {\n  return import(p);\n}')).toEqual(['dynamic-import']);
+  });
+
+  it('leaves a single complete literal alone', () => {
+    expect(forms("async function a() {\n  return import('./fixed.js');\n}")).toEqual([]);
+    expect(forms('async function a() {\n  return import(`./fixed.js`);\n}')).toEqual([]);
+    expect(forms('function a() {\n  return require("./fixed");\n}')).toEqual([]);
+    expect(forms("async function a() {\n  return import('./data.json', { with: { type: 'json' } });\n}")).toEqual([]);
+  });
+});
+
+
+describe('scanDynamicDispatch — import escapes and trivia (#1967)', () => {
+  it.each(['import', 'require'])('%s respects escapes and complete literals', (call) => {
+    const staticArgs = [
+      '`./plugins/\\${name}`',
+      '`./plugins/\\\\\\${name}`',
+      '`./plugins/\\`fixed`',
+      '"./plugins/\\"fixed"',
+      "'./plugins/\\'fixed'",
+      '/* before */ `./fixed` /* after */',
+      '// before\n "./fixed" // after\n',
+      '`./fixed`, { with: { type: "json" } }',
+      '"./${name}"',
+    ];
+    for (const arg of staticArgs) {
+      expect(scanDynamicDispatch(`${call}(${arg})`, 'typescript', 1), arg).toEqual([]);
+    }
+    const runtimeArgs = [
+      '`./plugins/\\\\${name}`',
+      '`./plugins/\\${literal}/${name}`',
+      '`./plugins/${`nested-${name}`}`',
+      '/* before */ "./plugins/" /* after */ + name',
+      '`./plugins/\\${literal}` + name',
+      '"./plugins/".concat(name)',
+      '// before\n `./plugins/${name}`, { with: { type: "json" } }',
+    ];
+    for (const arg of runtimeArgs) {
+      const matches = scanDynamicDispatch(`function load() {\n  ${call}(${arg});\n}`, 'typescript', 20);
+      expect(matches, arg).toHaveLength(1);
+      expect(matches[0], arg).toMatchObject({ form: 'dynamic-import', line: 21 });
+    }
+  });
+
+  it.each(['javascript', 'typescript', 'jsx', 'tsx', 'vue', 'svelte', 'astro', 'arkts'])(
+    'detects runtime imports across %s', (language) => {
+      expect(scanDynamicDispatch('import(`./${name}`)', language, 1)[0]?.form).toBe('dynamic-import');
+      expect(scanDynamicDispatch('import(`./fixed`)', language, 1)).toEqual([]);
+    },
+  );
 });

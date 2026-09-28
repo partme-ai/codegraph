@@ -11,7 +11,9 @@
  *  - decoy: an ambiguous cross-file name (no import, ≥2 definitions) → NO edge
  *  - same-file priority: a same-file definition beats a same-named decoy
  *  - kind filter: a class/variable passed as a value never gets a
- *    function-ref edge
+ *    function-ref edge — except Python, where class-as-value is a core
+ *    idiom and bare ids ALSO resolve to classes (#1478); methods stay
+ *    excluded for bare ids everywhere
  *  - self: a function passing itself → no self-loop
  *  - drain: all resolvable function_ref rows leave unresolved_refs (no
  *    batched-resolver runaway), and re-index is idempotent
@@ -23,6 +25,7 @@ import * as path from 'path';
 import * as os from 'os';
 import { CodeGraph } from '../src';
 import type { Edge } from '../src/types';
+import { ToolHandler } from '../src/mcp/tools';
 import { initGrammars, loadAllGrammars } from '../src/extraction/grammars';
 
 beforeAll(async () => {
@@ -742,6 +745,512 @@ describe('Function-as-value capture (#756)', () => {
       cg.destroy();
       tmpDir = undefined;
     }
+  });
+
+  it('PYTHON CLASSES: return / alias / registry dict / arg positions produce references edges (#1478)', async () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-fnref-pycls-'));
+    fs.writeFileSync(
+      path.join(tmpDir, 'serializers.py'),
+      [
+        'class OrgSerializerFull:',
+        '    pass',
+        '',
+        'class OrgSerializerBrief:',
+        '    pass',
+      ].join('\n')
+    );
+    fs.writeFileSync(
+      path.join(tmpDir, 'views.py'),
+      [
+        'from serializers import OrgSerializerFull, OrgSerializerBrief',
+        '',
+        'def register(cls):',
+        '    pass',
+        '',
+        'class OrgViewSet:',
+        '    def get_serializer_class(self):',
+        '        if True:',
+        '            return OrgSerializerFull',
+        '        return OrgSerializerBrief',
+        '',
+        'SERIALIZER_REGISTRY = {"org": OrgSerializerFull}',
+        'register(OrgSerializerBrief)',
+      ].join('\n')
+    );
+    fs.writeFileSync(
+      path.join(tmpDir, 'models.py'),
+      [
+        'class Config:',
+        '    pass',
+        '',
+        'def make_config_cls():',
+        '    return Config',
+        '',
+        'ActiveConfig = Config',
+      ].join('\n')
+    );
+
+    const cg = CodeGraph.initSync(tmpDir);
+    try {
+      await cg.indexAll();
+
+      // The DRF wiring: get_serializer_class → the imported serializer class,
+      // via `return` — the issue's headline gap. The module-level registry
+      // dict rides BOTH the assigned name (the initializer walk, #693) and the
+      // file node (the dispatcher's own scan, which runs either way).
+      expect(sourceNames(cg, fnRefEdgesInto(cg, 'OrgSerializerFull'))).toEqual([
+        'SERIALIZER_REGISTRY',
+        'get_serializer_class',
+        'views.py',
+      ]);
+      // Second branch return + a module-level call argument.
+      expect(sourceNames(cg, fnRefEdgesInto(cg, 'OrgSerializerBrief'))).toEqual([
+        'get_serializer_class',
+        'views.py',
+      ]);
+
+      // Same-file: factory return + module-level alias assignment.
+      expect(sourceNames(cg, fnRefEdgesInto(cg, 'Config'))).toEqual([
+        'make_config_cls',
+        'models.py',
+      ]);
+
+      // callers() must now surface the view as a consumer of the serializer.
+      const serializer = cg
+        .getNodesByName('OrgSerializerFull')
+        .find((n) => n.kind === 'class')!;
+      const callers = cg.getCallers(serializer.id);
+      expect(callers.some((c) => c.node.name === 'get_serializer_class')).toBe(true);
+    } finally {
+      cg.destroy();
+      tmpDir = undefined;
+    }
+  });
+
+  it('PYTHON KIND FILTER: bare ids still never resolve to methods; unknown names stay silent', async () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-fnref-pyneg-'));
+    fs.writeFileSync(
+      path.join(tmpDir, 'svc.py'),
+      [
+        'class Svc:',
+        '    def refresh(self):',
+        '        pass',
+        '',
+        'def wire(cb):',
+        '    pass',
+        '',
+        'def setup(refresh):',
+        // A local/parameter sharing a same-file METHOD name: the gate lets it
+        // through (methods are in definedHere) but resolution must refuse —
+        // a bare id can never be a method value in Python.
+        '    wire(refresh)',
+        // A name with no matching class/function anywhere: no edge, silently.
+        '    return unknown_thing',
+      ].join('\n')
+    );
+
+    const cg = CodeGraph.initSync(tmpDir);
+    try {
+      await cg.indexAll();
+      expect(fnRefEdgesInto(cg, 'refresh')).toHaveLength(0);
+      expect(fnRefEdgesInto(cg, 'unknown_thing')).toHaveLength(0);
+    } finally {
+      cg.destroy();
+      tmpDir = undefined;
+    }
+  });
+
+  it('#1820 PYTHON: obj.method passed as a callback is a caller; a unique method resolves', async () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-fnref-1820-py-'));
+    fs.writeFileSync(
+      path.join(tmpDir, 'store.py'),
+      [
+        'class Base:',
+        '    pass',
+        '',
+        'class Store(Base):',
+        '    def fetch(self, ids):',
+        '        return ids',
+      ].join('\n')
+    );
+    fs.writeFileSync(
+      path.join(tmpDir, 'consumer.py'),
+      [
+        'from concurrent.futures import ThreadPoolExecutor',
+        'from store import Base',
+        '',
+        'class Consumer:',
+        '    def __init__(self, store: Base):',
+        '        self.store = store',
+        '',
+        '    def direct(self, ids):',
+        '        return self.store.fetch(ids)',
+        '',
+        '    def via_callback(self, ids, pool: ThreadPoolExecutor):',
+        '        return pool.submit(self.store.fetch, ids)',
+      ].join('\n')
+    );
+
+    const cg = CodeGraph.initSync(tmpDir);
+    try {
+      await cg.indexAll();
+      const fetch = cg.getNodesByName('fetch').find((n) => n.kind === 'method')!;
+      const callers = cg.getCallers(fetch.id).map((c) => c.node.name).sort();
+      expect(callers).toContain('direct');
+      expect(callers).toContain('via_callback');
+      expect(sourceNames(cg, fnRefEdgesInto(cg, 'fetch'))).toEqual(['via_callback']);
+      expect([...cg.getImpactRadius(fetch.id).nodes.values()].map(n => n.name)).toContain('via_callback');
+      const response = await new ToolHandler(cg).execute('codegraph_explore', {
+        query: 'Consumer.via_callback Store.fetch',
+      });
+      expect(response.isError).not.toBe(true);
+      const text = response.content?.[0]?.text ?? '';
+      expect(text).toMatch(/`fetch`.*2 callers in `consumer.py`/);
+      expect(text).toContain('via_callback(method)');
+      expect(text).toContain('pool.submit(self.store.fetch, ids)');
+    } finally {
+      cg.destroy();
+    }
+  });
+
+  it('#1820 PYTHON: a test-file method still makes an unknown receiver ambiguous', async () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-fnref-1820-py-mock-'));
+    fs.writeFileSync(
+      path.join(tmpDir, 'store.py'),
+      'class Store:\n    def fetch(self, ids):\n        return ids\n'
+    );
+    fs.mkdirSync(path.join(tmpDir, 'tests'));
+    fs.writeFileSync(
+      path.join(tmpDir, 'tests', 'test_store.py'),
+      'class FakeStore:\n    def fetch(self, ids):\n        return ids\n'
+    );
+    fs.writeFileSync(
+      path.join(tmpDir, 'consumer.py'),
+      [
+        'class Consumer:',
+        '    def __init__(self, store):',
+        '        self.store = store',
+        '    def via_callback(self, pool, ids):',
+        '        return pool.submit(self.store.fetch, ids)',
+      ].join('\n')
+    );
+
+    const cg = CodeGraph.initSync(tmpDir);
+    try {
+      await cg.indexAll();
+      const edges = fnRefEdgesInto(cg, 'fetch');
+      expect(edges).toHaveLength(0);
+    } finally {
+      cg.destroy();
+    }
+  });
+
+  it('#1820 PYTHON: a NotImplementedError base still makes an unknown receiver ambiguous', async () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-fnref-1820-py-base-'));
+    fs.writeFileSync(
+      path.join(tmpDir, 'base.py'),
+      [
+        'class Base:',
+        '    def fetch(self, ids):',
+        '        raise NotImplementedError("subclass")',
+      ].join('\n')
+    );
+    fs.writeFileSync(
+      path.join(tmpDir, 'store.py'),
+      [
+        'from base import Base',
+        'class Store(Base):',
+        '    def fetch(self, ids):',
+        '        return ids',
+      ].join('\n')
+    );
+    fs.writeFileSync(
+      path.join(tmpDir, 'consumer.py'),
+      [
+        'class Consumer:',
+        '    def __init__(self, store):',
+        '        self.store = store',
+        '    def via_callback(self, pool, ids):',
+        '        return pool.submit(self.store.fetch, ids)',
+      ].join('\n')
+    );
+
+    const cg = CodeGraph.initSync(tmpDir);
+    try {
+      await cg.indexAll();
+      const edges = fnRefEdgesInto(cg, 'fetch');
+      expect(edges).toHaveLength(0);
+    } finally {
+      cg.destroy();
+    }
+  });
+
+  it('#1820 PYTHON: two methods of the same name produce no callback edge', async () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-fnref-1820-py-decoy-'));
+    fs.writeFileSync(path.join(tmpDir, 'a.py'), 'class A:\n    def fetch(self, ids):\n        return ids\n');
+    fs.writeFileSync(path.join(tmpDir, 'b.py'), 'class B:\n    def fetch(self, ids):\n        return ids\n');
+    fs.writeFileSync(
+      path.join(tmpDir, 'consumer.py'),
+      [
+        'class Consumer:',
+        '    def __init__(self, store):',
+        '        self.store = store',
+        '    def via_callback(self, pool, ids):',
+        '        return pool.submit(self.store.fetch, ids)',
+      ].join('\n')
+    );
+
+    const cg = CodeGraph.initSync(tmpDir);
+    try {
+      await cg.indexAll();
+      expect(fnRefEdgesInto(cg, 'fetch')).toHaveLength(0);
+    } finally {
+      cg.destroy();
+    }
+  });
+
+  it('#1820 GO: method value Submit(c.store.Fetch) is a caller; go Fetch(ids) is a call', async () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-fnref-1820-go-'));
+    fs.writeFileSync(
+      path.join(tmpDir, 'store.go'),
+      [
+        'package demo',
+        '',
+        'type Store struct{}',
+        '',
+        'func (s *Store) Fetch(ids []string) []string { return ids }',
+      ].join('\n')
+    );
+    fs.writeFileSync(
+      path.join(tmpDir, 'consumer.go'),
+      [
+        'package demo',
+        '',
+        'func Submit(fn func([]string) []string, ids []string) []string { return fn(ids) }',
+        '',
+        'type Consumer struct{ store *Store }',
+        '',
+        'func (c *Consumer) Direct(ids []string) []string { return c.store.Fetch(ids) }',
+        '',
+        'func (c *Consumer) ViaGo(ids []string) { go c.store.Fetch(ids) }',
+        '',
+        'func (c *Consumer) ViaSubmit(ids []string) []string { return Submit(c.store.Fetch, ids) }',
+      ].join('\n')
+    );
+
+    const cg = CodeGraph.initSync(tmpDir);
+    try {
+      await cg.indexAll();
+      const fetch = cg.getNodesByName('Fetch').find((n) => n.kind === 'method')!;
+      const callers = cg.getCallers(fetch.id).map((c) => c.node.name).sort();
+      expect(callers).toContain('Direct');
+      expect(callers).toContain('ViaGo');
+      expect(callers).toContain('ViaSubmit');
+      expect(sourceNames(cg, fnRefEdgesInto(cg, 'Fetch'))).toEqual(['ViaSubmit']);
+    } finally {
+      cg.destroy();
+    }
+  });
+
+  it('#1820: receiver identity beats same-file and imported-name decoys', async () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-fnref-receivers-'));
+    fs.writeFileSync(path.join(tmpDir, 'store.py'), `class Store:
+    def fetch(self, ids):
+        return ids
+`);
+    fs.writeFileSync(path.join(tmpDir, 'main.py'), `from store import Store as Actual
+class Store:
+    def fetch(self, ids):
+        return ids
+class Consumer:
+    def __init__(self, store: Actual):
+        self.store = store
+    def callback(self, pool, ids):
+        return pool.submit(self.store.fetch, ids)
+    def assigned(self):
+        cb = self.store.fetch
+    def collected(self):
+        return [self.store.fetch]
+def typed(obj: Actual, pool):
+    pool.submit(obj.fetch)
+def static(pool):
+    pool.submit(Actual.fetch)
+`);
+    const cg = CodeGraph.initSync(tmpDir);
+    try {
+      await cg.indexAll();
+      const edges = fnRefEdgesInto(cg, 'fetch');
+      expect(sourceNames(cg, edges)).toEqual(['assigned', 'callback', 'collected', 'static', 'typed']);
+      expect(edges.every(e => cg.getNode(e.target)?.filePath === 'store.py')).toBe(true);
+    } finally { cg.close(); }
+  });
+
+  it.each(['tasks', '.tasks'])('Python imported members do not fall back to their receiver (%s)', async (module) => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-fnref-import-members-'));
+    fs.writeFileSync(path.join(tmpDir, 'tasks.py'), `from celery import shared_task
+@shared_task
+def send_welcome(item_id):
+    return item_id
+class Store:
+    @staticmethod
+    def fetch():
+        return 1
+settings = None
+`);
+    fs.writeFileSync(path.join(tmpDir, 'main.py'), `from ${module} import send_welcome as welcome, Store as Actual, settings
+def direct():
+    welcome(1)
+def callback(pool):
+    pool.submit(welcome, 1)
+def enqueue():
+    welcome.delay(1)
+    welcome.apply_async(args=[1])
+def member_values(pool):
+    pool.submit(welcome.delay, 1)
+    cb = welcome.custom_attribute
+    return [welcome.apply_async]
+def missing_members():
+    Actual.missing()
+    settings.missing()
+def known_member():
+    Actual.fetch()
+def known_callback(pool):
+    pool.submit(Actual.fetch)
+def construct():
+    return Actual()
+`);
+    const cg = CodeGraph.initSync(tmpDir);
+    try {
+      await cg.indexAll();
+      const task = cg.getNodesByName('send_welcome').find(n => n.kind === 'function')!;
+      expect(sourceNames(cg, cg.getIncomingEdges(task.id).filter(e => e.kind === 'calls'))).toEqual(['direct']);
+      expect(sourceNames(cg, fnRefEdgesInto(cg, 'send_welcome'))).toEqual(['callback']);
+      const missing = cg.getNodesByName('missing_members')[0]!;
+      expect(cg.getOutgoingEdges(missing.id).filter(e => e.kind === 'calls' || e.kind === 'instantiates')).toEqual([]);
+      const fetch = cg.getNodesByName('fetch').find(n => n.kind === 'method')!;
+      expect(sourceNames(cg, cg.getIncomingEdges(fetch.id).filter(e => e.kind === 'calls'))).toEqual(['known_member']);
+      expect(sourceNames(cg, fnRefEdgesInto(cg, 'fetch'))).toEqual(['known_callback']);
+      const store = cg.getNodesByName('Store').find(n => n.kind === 'class')!;
+      expect(sourceNames(cg, cg.getIncomingEdges(store.id).filter(e => e.kind === 'instantiates'))).toEqual(['construct']);
+    } finally { cg.close(); }
+  });
+
+  it('#1820: same-file ambiguity and noncallable receivers stay unlinked', async () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-fnref-ambiguity-'));
+    fs.writeFileSync(path.join(tmpDir, 'main.py'), `class A:
+    def fetch(self):
+        return 1
+class B:
+    def fetch(self):
+        return 2
+class Data:
+    fetch = 42
+class Property:
+    @property
+    def fetch(self):
+        return 42
+def unknown(obj, pool):
+    pool.submit(obj.fetch)
+def data(obj: Data, pool):
+    pool.submit(obj.fetch)
+def prop(obj: Property, pool):
+    pool.submit(obj.fetch)
+def bare(fetch, pool):
+    pool.submit(fetch)
+class Own:
+    def fetch(self):
+        return 3
+    def bound(self, pool):
+        pool.submit(self.fetch)
+    @classmethod
+    def class_bound(cls, pool):
+        pool.submit(cls.fetch)
+`);
+    const cg = CodeGraph.initSync(tmpDir);
+    try {
+      await cg.indexAll();
+      const edges = fnRefEdgesInto(cg, 'fetch');
+      expect(sourceNames(cg, edges)).toEqual(['bound', 'class_bound']);
+      expect(edges.every(e => cg.getNode(e.target)?.qualifiedName === 'Own::fetch')).toBe(true);
+    } finally { cg.close(); }
+  });
+
+  it('#1820: typed, constructed and inherited Python receivers exclude noncallable values', async () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-fnref-known-'));
+    fs.writeFileSync(path.join(tmpDir, 'main.py'), `class Store:
+    def fetch(self):
+        return 1
+class Child(Store):
+    def inherited(self, pool):
+        pool.submit(self.fetch)
+class Data:
+    def __init__(self):
+        self.fetch = 42
+class Override(Store):
+    def __init__(self):
+        self.fetch = 42
+class Consumer:
+    def __init__(self):
+        self.store = Store()
+    def keyword(self, pool):
+        pool.submit(callback=self.store.fetch)
+def constructor(pool):
+    obj = Store()
+    pool.submit(obj.fetch)
+def partial_ref(obj: Store):
+    return partial(obj.fetch, 1)
+def mapped(obj: Store, xs):
+    return map(obj.fetch, xs)
+def data(obj: Data, pool):
+    pool.submit(obj.fetch)
+def override(obj: Override, pool):
+    pool.submit(obj.fetch)
+def primitive(obj: int, pool):
+    pool.submit(obj.fetch)
+def literal(pool):
+    obj = 42
+    pool.submit(obj.fetch)
+def reassigned(obj: Store, pool):
+    obj = 42
+    pool.submit(obj.fetch)
+def direct(obj: Store):
+    obj.fetch()
+`);
+    const cg = CodeGraph.initSync(tmpDir);
+    try {
+      await cg.indexAll();
+      expect(sourceNames(cg, fnRefEdgesInto(cg, 'fetch'))).toEqual([
+        'constructor', 'inherited', 'keyword', 'mapped', 'partial_ref',
+      ]);
+      const fetch = cg.getNodesByName('fetch').find(n => n.kind === 'method')!;
+      expect(sourceNames(cg, cg.getIncomingEdges(fetch.id).filter(e => e.kind === 'calls'))).toContain('direct');
+    } finally { cg.close(); }
+  });
+
+  it('#1820: Go receiver types disambiguate method values and reject external fields', async () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-fnref-go-scope-'));
+    fs.writeFileSync(path.join(tmpDir, 'main.go'), `package demo
+import "database/sql"
+type Store struct{}
+func (s *Store) Fetch() {}
+type Decoy struct{}
+func (d *Decoy) Fetch() {}
+type Consumer struct { store *Store; external *sql.DB }
+func (c *Consumer) Callback() { Submit(c.store.Fetch) }
+func Typed(s *Store) { Submit(s.Fetch) }
+func Assigned(s *Store) { cb := s.Fetch }
+func Collected(s *Store) { table := []func(){s.Fetch} }
+func MethodExpression() { Submit(Store.Fetch) }
+func (c *Consumer) External() { Submit(c.external.Fetch) }
+func Unknown(obj interface{}) { Submit(obj.Fetch) }
+`);
+    const cg = CodeGraph.initSync(tmpDir);
+    try {
+      await cg.indexAll();
+      const edges = fnRefEdgesInto(cg, 'Fetch');
+      expect(sourceNames(cg, edges)).toEqual(['Assigned', 'Callback', 'Collected', 'MethodExpression', 'Typed']);
+      expect(edges.every(e => cg.getNode(e.target)?.qualifiedName === 'Store::Fetch')).toBe(true);
+    } finally { cg.close(); }
   });
 
   it('DRAIN: resolvable function_ref rows leave unresolved_refs; re-index is stable', async () => {

@@ -34,13 +34,14 @@ function dartConstructorSignature(node: SyntaxNode): SyntaxNode | undefined {
   return undefined;
 }
 
-/** The name of the class/mixin/extension/enum lexically enclosing `node`. */
+/** The name of the class/mixin/extension/extension type/enum lexically enclosing `node`. */
 function dartEnclosingTypeName(node: SyntaxNode): string | undefined {
   let p = node.parent;
   while (p) {
     if (
       p.type === 'class_definition' || p.type === 'mixin_declaration' ||
-      p.type === 'extension_declaration' || p.type === 'enum_declaration'
+      p.type === 'extension_declaration' || p.type === 'extension_type_declaration' ||
+      p.type === 'enum_declaration'
     ) {
       return p.childForFieldName('name')?.text;
     }
@@ -132,7 +133,33 @@ export const dartExtractor: LanguageExtractor = {
   importTypes: ['import_or_export'],
   callTypes: [],  // Dart calls use identifier+selector, handled via extractBareCall
   variableTypes: [],
-  extraClassNodeTypes: ['mixin_declaration', 'extension_declaration'],
+  // `extension_type_declaration` is Dart 3's extension type. It sits beside the
+  // older `extension_declaration` — near-neighbour names — and its members live
+  // in an ordinary `class_body`, so it belongs on this list for the same reason
+  // the other two do.
+  extraClassNodeTypes: ['mixin_declaration', 'extension_declaration', 'extension_type_declaration'],
+  // A Dart `static_final_declaration` is exactly a top-level or class-`static`
+  // `const`/`final` — the shared-constant idiom — so extract it as `constant`
+  // for value-reference edges. Instance fields, `var`, and typed declarations
+  // use `initialized_identifier`, and method-locals use
+  // `initialized_variable_definition`; neither is this node, so there are no
+  // instance/local leaks to guard. The name is the first `identifier`; its
+  // parent scope (`file:` top-level / `class:` static member) comes from the
+  // node stack, both of which the value-reference target gate accepts.
+  visitNode: (node, ctx) => {
+    if (node.type === 'static_final_declaration') {
+      const nameNode = node.namedChildren.find((c: SyntaxNode) => c.type === 'identifier');
+      if (nameNode) {
+        const valueNode = nameNode.nextNamedSibling;
+        const initValue = valueNode ? getNodeText(valueNode, ctx.source).slice(0, 100) : undefined;
+        ctx.createNode('constant', getNodeText(nameNode, ctx.source), node, {
+          signature: initValue ? `= ${initValue}${initValue.length >= 100 ? '...' : ''}` : undefined,
+        });
+      }
+      return true;
+    }
+    return false;
+  },
   resolveBody: (node, bodyField) => {
     // Dart: function_body is a next sibling of function_signature/method_signature
     if (node.type === 'function_signature' || node.type === 'method_signature') {

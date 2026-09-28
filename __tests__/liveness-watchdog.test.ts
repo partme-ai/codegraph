@@ -18,6 +18,13 @@ describe('config parsing', () => {
     expect(parseWatchdogTimeoutMs('1500')).toBe(1500);
   });
 
+  it('parseWatchdogTimeoutMs caps at the largest delay a timer can hold (#1966)', () => {
+    // Node runs a setTimeout delay above 2^31-1 ms after 1 ms instead.
+    expect(parseWatchdogTimeoutMs('2147483647')).toBe(2147483647);
+    expect(parseWatchdogTimeoutMs('2147483648')).toBe(2147483647);
+    expect(parseWatchdogTimeoutMs('3000000000')).toBe(2147483647);
+  });
+
   it('deriveCheckIntervalMs stays within [50, 2000] and scales with the timeout', () => {
     expect(deriveCheckIntervalMs(60_000)).toBe(2000); // clamped high
     expect(deriveCheckIntervalMs(500)).toBe(100); // 500/5
@@ -57,11 +64,12 @@ describe('liveness watchdog (spawned, real watchdog process)', () => {
   function runChild(
     env: Record<string, string>,
     body: string,
-    hardTimeoutMs: number
+    hardTimeoutMs: number,
+    progressPaths?: string[]
   ): Promise<{ code: number | null; signal: NodeJS.Signals | 'TIMEOUT' | null }> {
     const src = `
       const { installMainThreadWatchdog } = require(${JSON.stringify(MODULE)});
-      installMainThreadWatchdog();
+      installMainThreadWatchdog(${progressPaths ? JSON.stringify({ progressPaths }) : ''});
       ${body}
     `;
     const child = spawn(process.execPath, ['-e', src], {
@@ -88,6 +96,15 @@ describe('liveness watchdog (spawned, real watchdog process)', () => {
   function expectKilled(r: { code: number | null; signal: NodeJS.Signals | 'TIMEOUT' | null }): void {
     expect(r.signal === 'SIGKILL' || (r.signal === null && r.code !== 0 && r.code !== null)).toBe(true);
   }
+
+  it('leaves a healthy process alone when the timeout is set past what a timer can hold (#1966)', async () => {
+    const r = await runChild(
+      { CODEGRAPH_WATCHDOG_TIMEOUT_MS: '3000000000' },
+      'setTimeout(() => process.exit(0), 1000);',
+      8000
+    );
+    expect(r).toEqual({ code: 0, signal: null });
+  }, 12000);
 
   it('SIGKILLs a process whose main thread wedges in a sync loop', async () => {
     const r = await runChild(
@@ -118,6 +135,69 @@ describe('liveness watchdog (spawned, real watchdog process)', () => {
     expect(signal).toBeNull(); // never signalled
     expect(code).toBe(7); // exited on its own terms
   }, 12000);
+
+  // --- disk-progress deferral (#1231): a blocked event loop is NOT a wedge
+  // when the watched DB files keep advancing (a slow synchronous SQLite
+  // statement on degraded storage). ---
+
+  /** Grow `file` every 150ms for `forMs`; resolves when done. */
+  function growFile(file: string, forMs: number): Promise<void> {
+    return new Promise((resolve) => {
+      const iv = setInterval(() => { fs.appendFileSync(file, 'x'.repeat(64)); }, 150);
+      setTimeout(() => { clearInterval(iv); resolve(); }, forMs);
+    });
+  }
+
+  it('does NOT kill a blocked loop while the watched files advance (slow store, not a wedge)', async () => {
+    const tmp = path.join(fs.mkdtempSync(path.join(require('os').tmpdir(), 'cg-wd-')), 'db-wal');
+    fs.writeFileSync(tmp, 'seed');
+    // Base timeout 500ms; the loop blocks for 2.5s (5 timeouts, under the 10×
+    // cap) while the test process grows the watched file. Old behavior: killed
+    // at ~500ms. New: deferred, exits on its own with code 5.
+    const [r] = await Promise.all([
+      runChild(
+        { CODEGRAPH_WATCHDOG_TIMEOUT_MS: '500' },
+        'setTimeout(() => { const end = Date.now() + 2500; while (Date.now() < end) {} process.exit(5); }, 200);',
+        10_000,
+        [tmp]
+      ),
+      growFile(tmp, 3200),
+    ]);
+    expect(r.signal).toBeNull();
+    expect(r.code).toBe(5);
+  }, 15000);
+
+  it('still kills a blocked loop when the watched files do NOT advance (a true wedge)', async () => {
+    const tmp = path.join(fs.mkdtempSync(path.join(require('os').tmpdir(), 'cg-wd-')), 'db-wal');
+    fs.writeFileSync(tmp, 'seed');
+    // Same blocked loop, nobody grows the file: the base timeout kills it long
+    // before its own exit(5) at 2.5s.
+    const r = await runChild(
+      { CODEGRAPH_WATCHDOG_TIMEOUT_MS: '500' },
+      'setTimeout(() => { const end = Date.now() + 2500; while (Date.now() < end) {} process.exit(5); }, 200);',
+      10_000,
+      [tmp]
+    );
+    expectKilled(r);
+  }, 15000);
+
+  it('kills at the hard cap even with ongoing file activity (bounded deferral)', async () => {
+    const tmp = path.join(fs.mkdtempSync(path.join(require('os').tmpdir(), 'cg-wd-')), 'db-wal');
+    fs.writeFileSync(tmp, 'seed');
+    // Base timeout 300ms ⇒ cap 3s. The loop blocks for 8s with continuous file
+    // growth: deferral carries it past 300ms but the cap kills it around ~3s,
+    // well before its own exit(5).
+    const [r] = await Promise.all([
+      runChild(
+        { CODEGRAPH_WATCHDOG_TIMEOUT_MS: '300' },
+        'setTimeout(() => { const end = Date.now() + 8000; while (Date.now() < end) {} process.exit(5); }, 200);',
+        15_000,
+        [tmp]
+      ),
+      growFile(tmp, 9000),
+    ]);
+    expectKilled(r);
+  }, 20000);
 
   it('does NOT kill a wedged process when CODEGRAPH_NO_WATCHDOG=1', async () => {
     const { code, signal } = await runChild(
