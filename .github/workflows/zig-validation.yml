@@ -54,7 +54,9 @@ jobs:
           mkdir -p "$RUNNER_TEMP/zig-package"
           npm pack --pack-destination "$RUNNER_TEMP/zig-package"
           version=$(node -p "require('./package.json').version")
-          tar -xzf "$RUNNER_TEMP/zig-package/colbymchenry-codegraph-$version.tgz" -C "$RUNNER_TEMP/zig-package"
+          # Read stdin so GNU tar does not interpret a Windows drive letter as
+          # a remote archive host (D:...). This also works with BSD tar.
+          tar -xzf - -C "$RUNNER_TEMP/zig-package" < "$RUNNER_TEMP/zig-package/colbymchenry-codegraph-$version.tgz"
           # Pin dependency resolution to the reviewed lockfile; the tarball itself
           # supplies every runtime file and the grammar notice.
           cp package-lock.json "$RUNNER_TEMP/zig-package/package/package-lock.json"
