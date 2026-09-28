@@ -12,6 +12,10 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### New Features
+
+- **Zig language support.** `.zig` files index with the vendored `tree-sitter-zig` grammar: functions and methods, container types (struct/enum/union/opaque/error set) with fields and enum members, type aliases, generic type functions (`pub fn Container(comptime T: type) type { return struct { ... } }` — the returned container and its members are indexed under the function's name), `const`/`var` declarations whose initializers record their calls and struct instantiations, relative-path `@import` import edges, `@embedFile`, `@cImport` header imports, and `test` blocks as function nodes. `std`/`builtin`/`root` are treated as compiler modules (no unresolvable refs), `.zon` manifests are tracked at file level only, and parse-error recovery shapes never mint nodes.
+
 ### Highlights
 
 - **`codegraph ui` — your graph in a browser.** A local, read-only viewer for the project you already indexed: your code with its callers and callees in the margin, a map of the whole repository, and a strip that shows how one symbol reaches another.
