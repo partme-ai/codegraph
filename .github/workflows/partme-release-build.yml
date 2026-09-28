@@ -1,0 +1,72 @@
+name: PartMe release build
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/partme-release-build.yml'
+      - 'scripts/prepare-partme-release.mjs'
+      - '__tests__/partme-release.test.ts'
+permissions:
+  contents: read
+jobs:
+  bundle:
+    if: github.repository == 'partme-ai/codegraph'
+    name: Bundle (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-22.04, target: linux-x64, triple: x86_64-unknown-linux-gnu }
+          - { runner: ubuntu-22.04-arm, target: linux-arm64, triple: aarch64-unknown-linux-gnu }
+          - { runner: macos-15-intel, target: darwin-x64, triple: x86_64-apple-darwin }
+          - { runner: macos-15, target: darwin-arm64, triple: aarch64-apple-darwin }
+          - { runner: windows-2022, target: win32-x64, triple: x86_64-pc-windows-msvc }
+          - { runner: windows-11-arm, target: win32-arm64, triple: aarch64-pc-windows-msvc }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - name: Stage fork distribution
+        run: CODEGRAPH_RELEASE_STAGE=1 node scripts/prepare-partme-release.mjs .
+      - run: npm ci
+      - name: Build native extraction kernel
+        run: bash scripts/build-kernel.sh --target '${{ matrix.triple }}'
+      - name: Build native platform bundle
+        run: bash scripts/build-bundle.sh '${{ matrix.target }}'
+      - name: Native kernel parity
+        if: matrix.target == 'linux-x64'
+        run: CODEGRAPH_KERNEL_EXPECT=1 npx vitest run __tests__/kernel-*.test.ts --maxWorkers=2 --minWorkers=1
+      - name: Verify installed fork identity and Zig graph behavior
+        run: |
+          set -euo pipefail
+          bash scripts/pack-npm.sh 1.6.0-zig
+          target='${{ matrix.target }}'
+          package_dir="release/npm/codegraph-$target"
+          test -f "$package_dir/lib/kernel/codegraph-kernel.node"
+          test -f "$package_dir/LICENSE"
+          test -f release/npm/main/LICENSE
+          runtime="$package_dir/node"
+          if [[ "$RUNNER_OS" == Windows ]]; then runtime="$package_dir/node.exe"; fi
+          test "$("$runtime" --liftoff-only "$package_dir/lib/dist/bin/codegraph.js" --version)" = '1.6.0-zig'
+          "$runtime" --liftoff-only scripts/check-zig-package.mjs "$package_dir/lib"
+          CODEGRAPH_PARALLEL_RESOLVE_MIN=0 "$runtime" --liftoff-only scripts/check-zig-package.mjs "$package_dir/lib"
+          mkdir -p release/npm/main/node_modules/@partme.ai
+          cp -R "$package_dir" "release/npm/main/node_modules/@partme.ai/codegraph-$target"
+          CODEGRAPH_NO_DOWNLOAD=1 node release/npm/main/npm-shim.js --version
+          node --liftoff-only -e "const assert=require('node:assert/strict');const sdk=require('./release/npm/main/npm-sdk.js');assert.equal(typeof sdk.CodeGraph,'function');const u=require('./$package_dir/lib/dist/upgrade');assert.equal(u.REPO,'partme-ai/codegraph');assert.equal(u.NPM_PACKAGE,'@partme.ai/codegraph');"
+          npx vitest run __tests__/npm-shim.test.ts __tests__/npm-sdk.test.ts __tests__/upgrade.test.ts --maxWorkers=2 --minWorkers=1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: partme-${{ matrix.target }}
+          path: |
+            release/codegraph-*.tar.gz
+            release/codegraph-*.zip
+          if-no-files-found: error
+          compression-level: 0

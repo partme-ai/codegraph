@@ -1,0 +1,22 @@
+# PartMe Zig distribution
+
+Release contract: publish `@partme.ai/codegraph@1.6.0-zig` and six matching
+platform packages, with GitHub prerelease `v1.6.0-zig` in `partme-ai/codegraph`.
+The npm `latest` tag intentionally selects this version so the unversioned
+`npx @partme.ai/codegraph` command works. This is a fork distribution, not an
+upstream release.
+
+The fork-only build workflow stages the identity/version changes with
+`scripts/prepare-partme-release.mjs`. Run that script only in a disposable
+checkout with `CODEGRAPH_RELEASE_STAGE=1`. It keeps upstream defaults in the
+contribution branch. Published launchers, SDK resolution, install and upgrade
+paths must all use the PartMe namespace; upstream license notices remain intact.
+
+Acceptance: six native platform builds contain their matching kernel, bundled
+Node, viewer, Zig grammar and notices; installed CLI reports `1.6.0-zig`; SDK
+loads from the matching platform package; Zig package graph checks pass with
+normal and forced-worker resolution. Linux additionally runs kernel parity.
+All six archives and SHA256SUMS are attached to the GitHub prerelease. Publish
+platform packages before the main shim, then verify registry metadata and an
+isolated `npx` execution. Do not publish the root source package or the private
+UI component workspace.
