@@ -1047,7 +1047,9 @@ export default app;
 
 /**
  * The acceptance bar from the issue, against the engine's OWN index rather than
- * a fixture: `LRUCache.get` in `src/resolution/lru-cache.ts`, 500+ callers.
+ * a fixture: `extractFromSource` in `src/extraction/tree-sitter.ts`, 500+ callers.
+ * LRUCache.get is no longer a hub in a fresh index; its old 500+ count depended
+ * on stale resolution edges. Keep the high-fan-in acceptance bar on a real hub.
  *
  * `.codegraph/` is gitignored, so this only runs on a machine that has indexed
  * this repository. The fixture test above covers the same properties in CI; this
@@ -1080,12 +1082,12 @@ describe.runIf(CodeGraph.isInitialized(path.resolve(__dirname, '..')))(
 
     it('answers in under 100 ms with grouped, capped lists and correct counts', async () => {
       const search = JSON.parse(
-        (await repoGet('/api/search?q=' + encodeURIComponent('LRUCache.get'))).body
+        (await repoGet('/api/search?q=' + encodeURIComponent('extractFromSource'))).body
       );
       const hit = search.results.items.find(
-        (r: any) => r.name === 'get' && r.file.endsWith('src/resolution/lru-cache.ts')
+        (r: any) => r.name === 'extractFromSource' && r.file.endsWith('src/extraction/tree-sitter.ts')
       );
-      expect(hit, 'LRUCache.get should be in the engine\'s own index').toBeTruthy();
+      expect(hit, 'extractFromSource should be in the engine\'s own index').toBeTruthy();
 
       await repoGet(`/api/node/${hit.id}`); // warm
 

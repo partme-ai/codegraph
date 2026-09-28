@@ -1,55 +1,79 @@
-# tree-sitter-zig.wasm — provenance & rebuild
+# Zig grammar: source, build and validation
 
-`src/extraction/wasm/tree-sitter-zig.wasm` is vendored because Zig has no
-grammar in the `tree-sitter-wasms` npm package this repo otherwise loads from.
+The vendored `src/extraction/wasm/tree-sitter-zig.wasm` is built from
+[`@tree-sitter-grammars/tree-sitter-zig` 1.1.2](https://www.npmjs.com/package/@tree-sitter-grammars/tree-sitter-zig/v/1.1.2),
+whose published `gitHead` is `b670c8df85a1568f498aa5c8cae42f51a90473c0` in
+[tree-sitter-grammars/tree-sitter-zig](https://github.com/tree-sitter-grammars/tree-sitter-zig/tree/b670c8df85a1568f498aa5c8cae42f51a90473c0).
+The upstream MIT license is preserved in [LICENSE.tree-sitter-zig](LICENSE.tree-sitter-zig) and shipped as `dist/extraction/wasm/LICENSE.tree-sitter-zig`.
 
-## Recorded facts (verifiable)
+| Input or output | Pinned value |
+| --- | --- |
+| Source archive | `https://registry.npmjs.org/@tree-sitter-grammars/tree-sitter-zig/-/tree-sitter-zig-1.1.2.tgz` |
+| Archive SHA-256 | `2512a88611e400dbafb9cb79b247c7f2671ed034e1714b33df29712ee93e534c` |
+| Local patch | `scripts/grammars/zig-empty-containers.patch` |
+| Generator | Tree-sitter CLI 0.27.0, `generate --abi 15` |
+| Compiler | Zig 0.16.0, `zig cc -target wasm32-wasi` |
+| Export | `tree_sitter_zig` |
+| WASM SHA-256 | `95d8eef504bde9cca06b7950d6a8ae177ce318d16080deac96f653b29c629f98` |
 
-- **SHA-256**: `512184b21b9d234b9462f0afaeb6932d508ce7b21ca5247ee47e04ba191fa807`
-- **Exported symbol**: `tree_sitter_zig`
-- **tree-sitter ABI**: 15 (verified with `node scripts/add-lang/check-grammar.mjs
-  src/extraction/wasm/tree-sitter-zig.wasm <sample>.zig` — 20/20 clean parses,
-  safe to reuse across files)
-- **Upstream**: built from a `tree-sitter-zig` grammar via
-  `tree-sitter build --wasm`; the exact upstream repository and revision were
-  **not recorded when the file was first vendored**. Before this ships, pin the
-  revision: identify it by comparing the node-kind table below against upstream
-  tags, then record repo + commit here the way `tree-sitter-cobol.md` does.
-
-## What the grammar covers (node inventory as exercised by the tests)
-
-Named node kinds the extractor relies on: `function_declaration`,
-`variable_declaration`, `test_declaration`, `comptime_declaration`,
-`using_namespace_declaration`, `container_field`, `struct_declaration`,
-`enum_declaration`, `union_declaration`, `opaque_declaration`,
-`error_set_declaration`, `call_expression`, `builtin_function`,
-`field_expression`, `struct_initializer`, `anonymous_struct_initializer`,
-`parameters`, `parameter`, `arguments`, `block`, `return_expression`,
-`error_union_type`, `pointer_type`, `slice_type`, `array_type`,
-`optional_type`, `nullable_type`, `builtin_type`, `identifier`.
-
-Verified against Zig **0.16** source at scale (1.5k-file real project: labeled
-switch, non-exhaustive enums, tagged unions with `inline else`, fat-pointer
-vtables, `@cImport`, multiline strings — zero parse errors).
-
-## Known grammar gaps (extraction compensates or skips)
-
-- `comptime var x: T = ...;` at container/file scope does not parse (recovers
-  into an ERROR node). The extractor skips ERROR subtrees entirely — no garbage
-  nodes enter the graph, and the declaration is simply absent.
-- `!foo(...)` / `!std.mem.eql(...)` parse with the negation operator inside the
-  callee node (`error_union_type` root). The extractor strips the leading `!`
-  from call reference names.
+The four-line grammar patch makes the member list optional in struct, enum,
+union and opaque declarations. Upstream 1.1.2 otherwise recovers an empty
+container by inserting a missing identifier. Fixing the grammar avoids
+special-case source rewriting or synthetic-field filtering in the extractor.
 
 ## Rebuild
 
+With the pinned tools already available (this script does not install tools):
+
 ```bash
-git clone <pinned-upstream>/tree-sitter-zig && cd tree-sitter-zig
-tree-sitter build --wasm
-cp tree-sitter-zig.wasm <repo>/src/extraction/wasm/
-# copy step also required by the root build (see copy-assets in package.json)
+TREE_SITTER_CLI=/absolute/path/to/tree-sitter \
+  bash scripts/build-zig-grammar.sh
+npm run build
+npx vitest run __tests__/zig-extraction.test.ts __tests__/zig-production.test.ts
 ```
 
-After any rebuild: update the SHA-256 above, then re-run the zig test suites —
-`__tests__/zig-extraction.test.ts` is the behavioral contract for the node
-kinds listed above.
+An optional first argument selects a different output WASM path. The script
+checks tool versions and the source archive hash, applies the checked-in patch,
+generates the C parser, compiles it, and validates 100 repeated parses with the
+project's `web-tree-sitter` runtime before copying the output. Two independent
+build directories produced identical WASM bytes on macOS arm64 on 2026-09-28.
+
+## Validation and limits
+
+The dedicated regressions check empty containers, import aliases and lexical
+scope, negative resolution, incremental target removal/restoration, generic
+returned containers, fields, type dependencies, nested initializer calls and
+error-union return types. Real-world evaluation separately checks extraction
+errors and tree-sitter `ERROR`/`MISSING` recovery; these are different gates.
+
+On the 2026-09-28 source snapshots: private corpus S (135 Zig files) and
+nullclaw (294 Zig files) have no syntax recovery. Private corpus L (1,517 Zig
+files) has eight syntax-error files, each independently rejected by Zig 0.16.0
+`zig fmt --check`. The old grammar reported 147 affected files there; the patch
+removed 139 false failures. See `docs/zig-production-audit.md` for scope and
+remaining release gates. These are syntax/extraction results, not compilation
+or business-behavior acceptance of those projects.
+
+The analyzer resolves literal relative `.zig` imports, including member aliases
+and block-local bindings. It supports bounded literal `build.zig` registrations
+and public alias chains; it does not evaluate arbitrary build code,
+computed import paths, generic type execution or arbitrary vtable dispatch.
+External compiler modules remain outside the graph. `@embedFile` can resolve
+only files admitted to the index; C include search paths require separate
+build-system evidence. A negated call is still normalized by extraction because
+this upstream grammar places `!` inside the callee type expression.
+
+## Previous binary
+
+The previous SHA-256 was
+`512184b21b9d234b9462f0afaeb6932d508ce7b21ca5247ee47e04ba191fa807`, introduced by
+repository commit `3057755426ae400a0f05c0e4d0acfb52f9006fc8` on 2026-06-07.
+Its exact upstream revision was not recorded. It was **not** byte-identical to
+the published 1.1.2 WASM, so matching node names did not establish provenance.
+This change replaces it with the pinned, reproducible build above.
+
+Syntax acceptance can be compared directly with Zig 0.16.0 `std.zig.Ast` using
+`ZIG_COMPILER=/path/to/zig node scripts/check-zig-ast.mjs` after the normal build.
+This validates controlled positive and negative fixtures without rebuilding the
+WASM. Corpus differential results and remaining recovery differences are in
+[the audit](../zig-production-audit.md).

@@ -14,7 +14,7 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### New Features
 
-- **Zig language support.** `.zig` files index with the vendored `tree-sitter-zig` grammar: functions and methods, container types (struct/enum/union/opaque/error set) with fields and enum members, type aliases, generic type functions (`pub fn Container(comptime T: type) type { return struct { ... } }` — the returned container and its members are indexed under the function's name), `const`/`var` declarations whose initializers record their calls and struct instantiations, relative-path `@import` import edges, `@embedFile`, `@cImport` header imports, and `test` blocks as function nodes. `std`/`builtin`/`root` are treated as compiler modules (no unresolvable refs), `.zon` manifests are tracked at file level only, and parse-error recovery shapes never mint nodes.
+- **Zig language support.** `.zig` files index with the vendored `tree-sitter-zig` grammar: functions and methods, container types (struct/enum/union/opaque/error set) with fields and enum members, type aliases, generic type functions (`pub fn Container(comptime T: type) type { return struct { ... } }` — the returned container and its members are indexed under the function's name), `const`/`var` declarations whose initializers record their calls and struct instantiations, relative-path `@import` import edges, `@embedFile`, `@cImport` header imports, and `test` blocks as function nodes. `std`/`builtin` are treated as external compiler modules; `root` resolves only with unambiguous project evidence, `.zon` manifests are tracked at file level only, and parse-error recovery shapes never mint nodes.
 
 ### Highlights
 
@@ -148,6 +148,8 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Trails are plain JSON, one file per trail, under `.codegraph/ui/trails/` — already ignored by git, so they stay yours by default. **Export** hands you the file if you'd rather commit one for the team. This is the only thing the viewer writes: it still never indexes, never changes your graph, and never touches a line of your code. Start it with `codegraph ui --read-only` and it won't write even that — saved trails can still be opened, just not saved or deleted.
 
 ### Fixes
+
+- Zig call graphs now follow quoted names, scoped imports, public alias chains and literal build-module registrations; incremental sync repairs changed bindings without selecting unrelated same-named functions. Receiver inference, initializer dependencies, error-set members, implicitly public enum members, reserved-word quoting, empty containers and packaged grammar initialization are covered by regression tests. Declared Zig runtime acceptance rejects skipped or missing required tests and defines a CI matrix for the six release platforms on Node 22/24. A Zig 0.16.0 `std.zig.Ast` syntax differential and compiler-backed fixtures gate Zig validation. Re-index Zig projects after upgrading.
 
 - The Claude Code prompt hook no longer runs on the task-notification messages Claude Code injects when a background agent finishes, removing a multi-second stall on every such turn. (#1832)
 

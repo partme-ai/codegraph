@@ -29,6 +29,9 @@ permissions:
   attestations: write  # store the GitHub artifact attestations for the bundles
 
 jobs:
+  zig-validation:
+    uses: ./.github/workflows/zig-validation.yml
+
   # Native extraction-kernel prebuilds (docs/design/rust-kernel-migration-plan.md).
   # As of 1.5.0 the kernel is the release's HEADLINE, not an optional extra, so
   # this matrix is REQUIRED: a failed kernel build blocks the release instead of
@@ -70,7 +73,7 @@ jobs:
 
   release:
     runs-on: ubuntu-latest
-    needs: kernel
+    needs: [kernel, zig-validation]
     steps:
       - uses: actions/checkout@v6
         with:

@@ -13,15 +13,77 @@ import type { ExtractorContext, LanguageExtractor } from '../tree-sitter-types';
  *     alias / value), decided in `visitNode` because the base's type-alias
  *     and variable paths cannot be combined for a single node type;
  *   - `@import` / `@embedFile` / `@cImport` builtins mint import nodes
- *     (`std`/`builtin`/`root` are compiler modules and never mint);
+ *     (`std`/`builtin` are external; `root` uses compilation context);
  *   - enum tags and tagged-union payloads use `container_field`, the same
  *     node kind as struct fields — split by parent in `visitNode`;
  *   - a generic type function `pub fn Container(comptime T: type) type`
  *     returns the container everyone uses — the returned declaration is
  *     indexed under the function's name;
- *   - parse-error recovery shapes (e.g. `comptime var`, unsupported by the
- *     grammar) must never mint nodes.
+ *   - parse-error recovery shapes must never mint invented declarations.
  */
+
+// Zig 0.16.0 std.zig.Token.keywords. Quoting is significant for these names:
+// @"export" is an identifier, while bare export cannot declare a symbol.
+const ZIG_KEYWORDS = new Set([
+  'addrspace', 'align', 'allowzero', 'and', 'anyframe', 'anytype', 'asm', 'break',
+  'callconv', 'catch', 'comptime', 'const', 'continue', 'defer', 'else', 'enum',
+  'errdefer', 'error', 'export', 'extern', 'fn', 'for', 'if', 'inline', 'noalias',
+  'noinline', 'nosuspend', 'opaque', 'or', 'orelse', 'packed', 'pub', 'resume',
+  'return', 'linksection', 'struct', 'suspend', 'switch', 'test', 'threadlocal',
+  'try', 'union', 'unreachable', 'var', 'volatile', 'while',
+]);
+
+/** Decode a Zig string literal without evaluating source. Invalid UTF-8 paths
+ * and invalid escape sequences remain unresolved rather than being guessed. */
+export function zigString(text: string): string | undefined {
+  if (!text.startsWith('"') || !text.endsWith('"')) return undefined;
+  const bytes: number[] = [];
+  const body = text.slice(1, -1);
+  for (let i = 0; i < body.length;) {
+    if (body[i] !== '\\') {
+      const point = body.codePointAt(i)!;
+      bytes.push(...Buffer.from(String.fromCodePoint(point)));
+      i += point > 0xffff ? 2 : 1;
+      continue;
+    }
+    const escape = body[++i];
+    if (!escape) return undefined;
+    const simple: Record<string, string> = { n: '\n', r: '\r', t: '\t', '\\': '\\', '"': '"', "'": "'" };
+    if (simple[escape] !== undefined) { bytes.push(...Buffer.from(simple[escape])); i++; continue; }
+    if (escape === 'x' && /^[a-fA-F0-9]{2}$/.test(body.slice(i + 1, i + 3))) {
+      bytes.push(parseInt(body.slice(i + 1, i + 3), 16)); i += 3; continue;
+    }
+    const unicode = body.slice(i).match(/^u\{([a-fA-F0-9]{1,6})\}/);
+    if (!unicode) return undefined;
+    const point = parseInt(unicode[1]!, 16);
+    if (point > 0x10ffff || (point >= 0xd800 && point <= 0xdfff)) return undefined;
+    bytes.push(...Buffer.from(String.fromCodePoint(point))); i += unicode[0].length;
+  }
+  try { return new TextDecoder('utf-8', { fatal: true }).decode(new Uint8Array(bytes)); }
+  catch { return undefined; }
+}
+
+/** Keep punctuation inside quoted identifiers; equivalent spellings share a key. */
+export function zigIdentifier(text: string): string {
+  if (!text.startsWith('@"')) return text;
+  const decoded = zigString(text.slice(1));
+  if (decoded === undefined) return text;
+  return /^[A-Za-z_][A-Za-z_0-9]*$/.test(decoded) && !ZIG_KEYWORDS.has(decoded) ? decoded : '@' + JSON.stringify(decoded);
+}
+
+/** Split a qualified name only outside string identifiers. */
+export function zigSegments(text: string): string[] {
+  return (text.match(/@"(?:\\.|[^"\\])*"|[^.]+/g) ?? []).map(zigIdentifier);
+}
+
+/** Reconstruct expressions from syntax tokens: discard trivia, preserve strings. */
+export function zigExpressionName(node: SyntaxNode): string {
+  if (node.type === 'identifier') return zigIdentifier(node.text);
+  if (node.type === 'string') return node.text;
+  if (node.type === 'comment') return '';
+  if (!node.childCount) return node.text.trim();
+  return node.children.map(zigExpressionName).join('');
+}
 
 // ── Constants ─────────────────────────────────────────────────────────
 
@@ -40,7 +102,7 @@ export const ZIG_TYPE_DECL_TYPES = new Set([
  * the ref could only ever fail resolution, and the resolution layer
  * additionally filters the dotted uses (std.mem.eql) as external.
  */
-const COMPILER_MODULES = new Set(['std', 'builtin', 'root']);
+const COMPILER_MODULES = new Set(['std', 'builtin']);
 
 /**
  * Primitive / compiler-provided type names that are never user symbols.
@@ -79,6 +141,59 @@ export interface ZigTypeNameRef {
   name: string;
   line: number;
   column: number;
+  candidates?: string[];
+}
+
+/** Bind a use to the nearest literal @import in its AST scope. Candidate names
+ * carry the module path plus its qualified member through the existing stored
+ * unresolved-reference contract, including worker and incremental indexing.
+ */
+export function zigImportCandidates(node: SyntaxNode, name: string): string[] | undefined {
+  // An inline import is itself the receiver, not a lexical variable binding.
+  const expression = node.type === 'call_expression' ? node.childForFieldName('function') : node;
+  const direct = expression && zigAlias(expression);
+  if (direct?.module) return [encodeZigTarget(direct)];
+  const [binding, ...members] = zigSegments(name);
+  if (!binding) return undefined;
+  let scope: SyntaxNode | null = node.parent;
+  while (scope) {
+    if (scope.type === 'function_declaration') {
+      const params = scope.namedChildren.find(c => c.type === 'parameters');
+      if (params?.namedChildren.some(p => zigIdentifier(p.childForFieldName('name')?.text ?? '') === binding)) return undefined;
+    }
+    if (scope.type === 'source_file' || scope.type === 'block' || ZIG_TYPE_DECL_TYPES.has(scope.type)) {
+      const declaration = scope.namedChildren.filter(c => c.type === 'variable_declaration' &&
+        zigIdentifier(c.namedChild(0)?.text ?? '') === binding && (scope!.type !== 'block' || c.endIndex <= node.startIndex)).at(-1);
+      if (declaration) {
+        const value = declaration.namedChildren.filter(c => c.type !== 'comment').at(-1);
+        const alias = value && zigAlias(value);
+        if (alias?.module) return [encodeZigTarget({ ...alias, members: [...alias.members, ...members] })];
+        // The resolver follows stored alias metadata through file/container scopes.
+        return undefined;
+      }
+    }
+    scope = scope.parent;
+  }
+  return undefined;
+}
+
+export interface ZigTarget { module?: string; members: string[] }
+export function encodeZigTarget(target: ZigTarget): string { return 'zig:' + JSON.stringify(target); }
+
+/** Only literal imports and identifier/member expressions carry static alias evidence. */
+export function zigAlias(node: SyntaxNode): ZigTarget | undefined {
+  const children = node.namedChildren.filter(c => c.type !== 'comment');
+  if (node.type === 'identifier') return { members: [zigIdentifier(node.text)] };
+  if (node.type === 'field_expression') {
+    const base = children[0] && zigAlias(children[0]);
+    return base && children[1]?.type === 'identifier' ? { ...base, members: [...base.members, zigIdentifier(children[1].text)] } : undefined;
+  }
+  if (node.type === 'builtin_function' && children[0]?.text === '@import') {
+    const arg = children.find(c => c.type === 'arguments')?.namedChildren.find(c => c.type !== 'comment');
+    const module = arg?.type === 'string' ? zigString(arg.text) : undefined;
+    return module ? { module, members: [] } : undefined;
+  }
+  return undefined;
 }
 
 /**
@@ -92,22 +207,22 @@ export function collectZigTypeNames(node: SyntaxNode, source: string): ZigTypeNa
   const refs: ZigTypeNameRef[] = [];
   const walk = (n: SyntaxNode): void => {
     if (n.type === 'builtin_type') return;
+    if (n.type === 'field_expression') {
+      const name = zigExpressionName(n);
+      refs.push({ name, line: n.startPosition.row + 1, column: n.startPosition.column,
+        candidates: zigImportCandidates(n, name) });
+      return;
+    }
     if (n.type === 'parameter') {
-      // Skip the parameter NAME (first identifier) — only its type matters.
-      let isFirst = true;
-      for (let i = 0; i < n.namedChildCount; i++) {
-        const child = n.namedChild(i);
-        if (!child) continue;
-        if (isFirst && child.type === 'identifier') { isFirst = false; continue; }
-        isFirst = false;
-        walk(child);
-      }
+      const type = n.childForFieldName('type');
+      if (type) walk(type);
       return;
     }
     if (n.type === 'identifier') {
-      const text = getNodeText(n, source);
+      const text = zigIdentifier(getNodeText(n, source));
       if (text && !ZIG_PRIMITIVE_TYPES.has(text)) {
-        refs.push({ name: text, line: n.startPosition.row + 1, column: n.startPosition.column });
+        refs.push({ name: text, line: n.startPosition.row + 1, column: n.startPosition.column,
+          candidates: zigImportCandidates(n, text) });
       }
       return;
     }
@@ -130,6 +245,7 @@ function addZigTypeRefs(node: SyntaxNode, fromNodeId: string, ctx: ExtractorCont
       referenceKind: 'references',
       line: ref.line,
       column: ref.column,
+      candidates: ref.candidates,
     });
   }
 }
@@ -160,20 +276,6 @@ function findTypeDeclaration(node: SyntaxNode): SyntaxNode | null {
   return null;
 }
 
-function findImportBuiltin(node: SyntaxNode, source: string): SyntaxNode | null {
-  if (node.type === 'builtin_function') {
-    const text = source.substring(node.startIndex, node.endIndex);
-    if (/@import\s*\(\s*"([^"]+)"\s*\)/.test(text)) return node;
-  }
-  for (let i = 0; i < node.namedChildCount; i++) {
-    const child = node.namedChild(i);
-    if (!child) continue;
-    const found = findImportBuiltin(child, source);
-    if (found) return found;
-  }
-  return null;
-}
-
 /**
  * A `fn ...(comptime T: type, ...) type` returns a container type — find the
  * first `return struct {...}` / enum / union / opaque / error-set declaration
@@ -184,7 +286,12 @@ function findReturnedTypeDecl(body: SyntaxNode): SyntaxNode | null {
   let found: SyntaxNode | null = null;
   const visit = (node: SyntaxNode): void => {
     if (found) return;
-    if (ZIG_TYPE_DECL_TYPES.has(node.type)) { found = node; return; }
+    if (ZIG_TYPE_DECL_TYPES.has(node.type) || node.type === 'function_declaration') return;
+    if (node.type === 'return_expression') {
+      const value = node.namedChild(0);
+      if (value) found = findTypeDeclaration(value);
+      return;
+    }
     for (let i = 0; i < node.namedChildCount; i++) {
       const child = node.namedChild(i);
       if (child) visit(child);
@@ -227,11 +334,18 @@ function emitTypeDeclaration(
   for (let i = 0; i < valueNode.namedChildCount; i++) {
     const child = valueNode.namedChild(i);
     if (!child) continue;
-    if (child.type === 'container_field' && (isEnum || isTaggedUnion)) {
+    if (valueNode.type === 'error_set_declaration' && child.type === 'identifier') {
+      // Error-set members are bare identifier children, unlike enum fields.
+      if (!ZIG_KEYWORDS.has(child.text)) ctx.createNode('enum_member', zigIdentifier(child.text), child, { visibility: 'public' });
+    } else if (child.type === 'container_field' && (isEnum || isTaggedUnion)) {
       const nameField = getChildByField(child, 'name');
-      if (nameField) {
-        const memberName = getNodeText(nameField, ctx.source);
-        if (memberName !== '_') ctx.createNode('enum_member', memberName, child);
+      if (nameField && !ZIG_KEYWORDS.has(nameField.text)) {
+        const memberName = zigIdentifier(getNodeText(nameField, ctx.source));
+        if (memberName !== '_') {
+          const member = ctx.createNode('enum_member', memberName, child, { visibility: 'public' });
+          const payload = getChildByField(child, 'type');
+          if (member && payload) addZigTypeRefs(payload, member.id, ctx);
+        }
       }
     } else {
       ctx.visitNode(child);
@@ -251,7 +365,7 @@ function handleVariableDeclaration(node: SyntaxNode, ctx: ExtractorContext): boo
     const child = node.namedChild(i);
     if (!child) continue;
     if (child.type === 'identifier' && !name) {
-      name = getNodeText(child, ctx.source);
+      name = zigIdentifier(getNodeText(child, ctx.source));
       continue;
     }
     if (name && !valueNode) valueNode = findTypeDeclaration(child);
@@ -303,8 +417,9 @@ function handleVariableDeclaration(node: SyntaxNode, ctx: ExtractorContext): boo
         .find((c, i) => !!c && node.fieldNameForNamedChild(i) === 'type');
       if (typeAnnotation) addZigTypeRefs(typeAnnotation, varNode.id, ctx);
       if (initializer) {
-        scanInitializerImports(initializer, ctx);
+        ctx.pushScope(varNode.id);
         ctx.visitFunctionBody(initializer, varNode.id);
+        ctx.popScope();
       }
       return true;
     }
@@ -345,79 +460,24 @@ function handleTypeAlias(node: SyntaxNode, name: string, ctx: ExtractorContext):
 
 /** `@import("path")` / `@embedFile("path")` inside a `const` initializer. */
 function handleImports(node: SyntaxNode, ctx: ExtractorContext): boolean {
-  for (let i = 0; i < node.namedChildCount; i++) {
-    const child = node.namedChild(i);
-    if (!child) continue;
-
-    if (child.type === 'builtin_function' || child.type === 'call_expression') {
-      const text = ctx.source.substring(child.startIndex, Math.min(child.endIndex, child.startIndex + 20));
-
-      if (text.startsWith('@import(') || findImportBuiltin(child, ctx.source)) {
-        const m = ctx.source.substring(child.startIndex, child.endIndex).match(/@import\s*\(\s*"([^"]+)"\s*\)/);
-        if (m) {
-          const moduleName = m[1]!;
-          if (!COMPILER_MODULES.has(moduleName)) {
-            const sig = ctx.source.substring(node.startIndex, Math.min(node.endIndex, node.startIndex + 80)).trim();
-            const importId = ctx.createNode('import', moduleName, node, { signature: sig });
-            if (importId) {
-              ctx.addUnresolvedReference({
-                fromNodeId: importId.id,
-                referenceName: moduleName,
-                referenceKind: 'imports',
-                line: child.startPosition.row + 1,
-                column: child.startPosition.column,
-              });
-            }
-          }
-          return true;
-        }
-      }
-
-      if (text.startsWith('@embedFile(')) {
-        const m = ctx.source.substring(child.startIndex, child.endIndex).match(/@embedFile\s*\(\s*"([^"]+)"\s*\)/);
-        if (m) {
-          const filePath = m[1]!;
-          const importId = ctx.createNode('import', filePath, node, { signature: `@embedFile("${filePath}")` });
-          if (importId) {
-            ctx.addUnresolvedReference({
-              fromNodeId: importId.id,
-              referenceName: filePath,
-              referenceKind: 'imports',
-              line: child.startPosition.row + 1,
-              column: child.startPosition.column,
-            });
-          }
-          return true;
-        }
-      }
-
-      if (text.startsWith('@cImport(')) {
-        emitCIncludes(child, ctx);
-        return true;
-      }
-    }
-  }
-  return false;
+  // Only a direct builtin owns the declaration. Imports nested in ordinary
+  // calls are dependencies of the value, not replacements for that value.
+  const value = node.namedChildren.at(-1);
+  return value?.type === 'builtin_function' ? emitZigBuiltinImport(value, ctx) : false;
 }
 
 /** Import nodes + refs for every `@cInclude("x.h")` inside a `@cImport` block. */
 function emitCIncludes(node: SyntaxNode, ctx: ExtractorContext): void {
   const visit = (n: SyntaxNode): void => {
-    if (n.type === 'builtin_function') {
-      const text = ctx.source.substring(n.startIndex, Math.min(n.endIndex, n.startIndex + 80));
-      const m = text.match(/@cInclude\s*\(\s*"([^"]+)"\s*\)/);
-      if (m) {
-        const header = m[1]!;
-        const importId = ctx.createNode('import', header, n, { signature: `@cInclude("${header}")` });
-        if (importId) {
-          ctx.addUnresolvedReference({
-            fromNodeId: importId.id,
-            referenceName: header,
-            referenceKind: 'imports',
-            line: n.startPosition.row + 1,
-            column: n.startPosition.column,
-          });
-        }
+    if (n.type === 'builtin_function' && n.namedChild(0)?.text === '@cInclude') {
+      const arg = n.namedChildren.find(c => c.type === 'arguments')?.namedChildren.find(c => c.type !== 'comment');
+      if (arg?.type === 'string' && zigString(arg.text)) {
+        const header = zigString(arg.text)!;
+        const importId = ctx.createNode('import', header, n, { signature: n.text });
+        if (importId) ctx.addUnresolvedReference({
+          fromNodeId: importId.id, referenceName: header, referenceKind: 'imports',
+          line: n.startPosition.row + 1, column: n.startPosition.column,
+        });
       }
     }
     for (let i = 0; i < n.namedChildCount; i++) {
@@ -435,61 +495,20 @@ function emitCIncludes(node: SyntaxNode, ctx: ExtractorContext): void {
  * as a compiler-intrinsic call reference.
  */
 function emitZigBuiltinImport(node: SyntaxNode, ctx: ExtractorContext): boolean {
-  const text = ctx.source.substring(node.startIndex, node.endIndex);
-  const imp = text.match(/@import\s*\(\s*"([^"]+)"\s*\)/);
-  if (imp) {
-    if (!COMPILER_MODULES.has(imp[1]!)) {
-      const importId = ctx.createNode('import', imp[1]!, node, { signature: text.trim().slice(0, 80) });
-      if (importId) {
-        ctx.addUnresolvedReference({
-          fromNodeId: importId.id,
-          referenceName: imp[1]!,
-          referenceKind: 'imports',
-          line: node.startPosition.row + 1,
-          column: node.startPosition.column,
-        });
-      }
-    }
-    return true;
-  }
-  const embed = text.match(/@embedFile\s*\(\s*"([^"]+)"\s*\)/);
-  if (embed) {
-    const importId = ctx.createNode('import', embed[1]!, node, { signature: text.trim().slice(0, 80) });
-    if (importId) {
-      ctx.addUnresolvedReference({
-        fromNodeId: importId.id,
-        referenceName: embed[1]!,
-        referenceKind: 'imports',
-        line: node.startPosition.row + 1,
-        column: node.startPosition.column,
-      });
-    }
-    return true;
-  }
-  if (text.startsWith('@cImport(')) {
-    emitCIncludes(node, ctx);
-    return true;
-  }
-  return false;
-}
+  const builtin = node.namedChildren.find(c => c.type === 'builtin_identifier')?.text;
+  if (builtin === '@cImport') { emitCIncludes(node, ctx); return true; }
+  if (builtin !== '@import' && builtin !== '@embedFile') return false;
+  const arg = node.namedChildren.find(c => c.type === 'arguments')?.namedChildren.find(c => c.type !== 'comment');
+  if (arg?.type !== 'string') return true;
+  const literal = zigString(arg.text);
+  if (!literal) return true;
+  if (builtin === '@import' && COMPILER_MODULES.has(literal)) return true;
 
-/**
- * Scan a `const`/`var` initializer for import-shaped builtins anywhere in the
- * expression (`const C = @import("x.zig").Member` wraps the builtin in a field
- * chain the body walker never dispatches to visitNode).
- */
-function scanInitializerImports(initializer: SyntaxNode, ctx: ExtractorContext): void {
-  const visit = (n: SyntaxNode): void => {
-    if (n.type === 'builtin_function') {
-      emitZigBuiltinImport(n, ctx);
-      return;
-    }
-    for (let i = 0; i < n.namedChildCount; i++) {
-      const child = n.namedChild(i);
-      if (child) visit(child);
-    }
-  };
-  visit(initializer);
+  const importId = ctx.createNode('import', literal, node, { signature: node.text });
+  if (importId) ctx.addUnresolvedReference({ fromNodeId: importId.id,
+    referenceName: literal, referenceKind: 'imports',
+    line: node.startPosition.row + 1, column: node.startPosition.column });
+  return true;
 }
 
 // ── Extractor ─────────────────────────────────────────────────────────
@@ -524,7 +543,8 @@ export const zigExtractor: LanguageExtractor = {
         }
       }
     }
-    return undefined;
+    const name = getChildByField(node, 'name');
+    return name?.type === 'identifier' ? zigIdentifier(name.text) : undefined;
   },
 
   resolveBody: (node, bodyField) => {
@@ -570,6 +590,8 @@ export const zigExtractor: LanguageExtractor = {
    * vtable-style free functions declared outside their type).
    */
   getReceiverType: (node, source) => {
+    // Nested container methods already have the correct lexical owner.
+    if (node.parent && ZIG_TYPE_DECL_TYPES.has(node.parent.type)) return undefined;
     for (let i = 0; i < node.namedChildCount; i++) {
       const child = node.namedChild(i);
       if (child?.type !== 'parameters') continue;
@@ -607,8 +629,11 @@ export const zigExtractor: LanguageExtractor = {
   getReturnType: (node, source) => {
     let rt = getChildByField(node, 'type');
     while (rt && (rt.type === 'pointer_type' || rt.type === 'nullable_type' || rt.type === 'error_union_type')) {
-      rt = rt.namedChild(0) ?? null;
+      rt = rt.type === 'error_union_type'
+        ? getChildByField(rt, 'ok') ?? rt.namedChild(rt.namedChildCount - 1)
+        : rt.namedChild(0) ?? null;
     }
+    if (rt?.type === 'builtin_function' && /^@This\s*\(\s*\)$/.test(rt.text)) return 'self';
     if (!rt || rt.type !== 'identifier') return undefined;
     const text = getNodeText(rt, source).trim();
     if (!text || ZIG_PRIMITIVE_TYPES.has(text)) return undefined;
@@ -625,10 +650,11 @@ export const zigExtractor: LanguageExtractor = {
   },
 
   visitNode: (node, ctx) => {
+    const declarationName = node.type === 'variable_declaration'
+      ? node.namedChildren.find(c => c.type === 'identifier') : getChildByField(node, 'name');
+    if (declarationName && ZIG_KEYWORDS.has(declarationName.text)) return true;
     switch (node.type) {
-      // Error-recovery shapes must not mint nodes: their children carry
-      // garbage names (e.g. `comptime var x: u32 = 0;` — unsupported by this
-      // grammar — recovers into a container_field named "var").
+      // Recovery children can contain invented declaration names.
       case 'ERROR':
         return true;
 
@@ -649,8 +675,8 @@ export const zigExtractor: LanguageExtractor = {
         ) {
           const nameField = getChildByField(node, 'name');
           if (nameField) {
-            const memberName = getNodeText(nameField, ctx.source);
-            if (memberName && memberName !== '_') ctx.createNode('enum_member', memberName, node);
+            const memberName = zigIdentifier(getNodeText(nameField, ctx.source));
+            if (memberName && memberName !== '_') ctx.createNode('enum_member', memberName, node, { visibility: 'public' });
           }
           return true;
         }
@@ -683,7 +709,7 @@ export const zigExtractor: LanguageExtractor = {
         if (!typeDecl) return false;
 
         const nameField = getChildByField(node, 'name');
-        const name = nameField ? getNodeText(nameField, ctx.source) : '';
+        const name = nameField ? zigIdentifier(getNodeText(nameField, ctx.source)) : '';
         if (!name) return false;
 
         const isPub = hasKeyword(node, 'pub');
@@ -694,7 +720,22 @@ export const zigExtractor: LanguageExtractor = {
         });
         if (!fnNode) return true;
         ctx.pushScope(fnNode.id);
-        emitTypeDeclaration(typeDecl, typeDecl, name, isPub, ctx, { typeFunction: true });
+        const params = node.namedChildren.find(c => c.type === 'parameters');
+        if (params) addZigTypeRefs(params, fnNode.id, ctx);
+        // Walk statements outside the returned container once, preserving their
+        // calls without attributing container methods to the factory function.
+        const visit = (n: SyntaxNode): void => {
+          if (n.id === typeDecl.id) {
+            emitTypeDeclaration(n, n, name, isPub, ctx, { typeFunction: true });
+          } else if (n.type === 'variable_declaration' || n.type === 'function_declaration') {
+            ctx.visitNode(n);
+          } else if (n.type === 'call_expression' || n.type === 'builtin_function') {
+            ctx.visitFunctionBody(n, fnNode.id);
+          } else {
+            for (const child of n.namedChildren) visit(child);
+          }
+        };
+        visit(body);
         ctx.popScope();
         return true;
       }

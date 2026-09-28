@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import { extractFromSource, initGrammars, loadGrammarsForLanguages } from '../src/extraction';
 import * as fs from 'fs';
 import * as path from 'path';
+import { getParser } from '../src/extraction/grammars';
 
 /**
  * Real-world Zig extraction evaluation, driven by environment variables so it
@@ -26,7 +27,7 @@ function walkZigFiles(dir: string): string[] {
   const result: string[] = [];
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     const full = path.join(dir, entry.name);
-    if (entry.isDirectory() && !entry.name.startsWith('.') && entry.name !== 'zig-cache' && entry.name !== 'node_modules')
+    if (entry.isDirectory() && !entry.name.startsWith('.') && !['zig-cache', 'zig-out', 'node_modules'].includes(entry.name))
       result.push(...walkZigFiles(full));
     else if (entry.isFile() && entry.name.endsWith('.zig'))
       result.push(full);
@@ -41,20 +42,36 @@ beforeAll(async () => {
 });
 
 describe.skipIf(!rootAvailable)(`Zig Real-World Extraction: ${path.basename(PROJECT_ROOT) || 'ZIG_E2E_ROOT'}`, () => {
-  const zigFiles = walkZigFiles(PROJECT_ROOT);
+  const zigFiles = rootAvailable ? walkZigFiles(PROJECT_ROOT) : [];
 
-  it('should parse all .zig files without errors', () => {
+  it('should extract all .zig files without reported errors', () => {
     expect(zigFiles.length).toBeGreaterThan(0);
     const errors: string[] = [];
     for (const filePath of zigFiles) {
       try {
         const code = fs.readFileSync(filePath, 'utf8');
-        extractFromSource(filePath, code);
+        const result = extractFromSource(filePath, code);
+        for (const error of result.errors) errors.push(`${path.relative(PROJECT_ROOT, filePath)}: ${error.message}`);
       } catch (e: any) {
         errors.push(`${path.relative(PROJECT_ROOT, filePath)}: ${e.message}`);
       }
     }
-    expect(errors.length).toBe(0);
+    expect(errors).toEqual([]);
+  });
+
+  it('should parse all .zig files without ERROR or MISSING recovery', () => {
+    const parser = getParser('zig');
+    expect(parser).not.toBeNull();
+    const failures: string[] = [];
+    for (const file of zigFiles) {
+      const tree = parser!.parse(fs.readFileSync(file, 'utf8'));
+      try {
+        if (!tree || tree.rootNode.hasError) failures.push(path.relative(PROJECT_ROOT, file));
+      } finally {
+        tree?.delete();
+      }
+    }
+    expect(failures, 'Grammar recovery is distinct from extraction exceptions').toEqual([]);
   });
 
   it('should extract nodes from the majority of files', () => {
@@ -62,12 +79,12 @@ describe.skipIf(!rootAvailable)(`Zig Real-World Extraction: ${path.basename(PROJ
     for (const filePath of zigFiles) {
       const code = fs.readFileSync(filePath, 'utf8');
       const result = extractFromSource(filePath, code);
-      if (result.nodes.length > 0) filesWithNodes++;
+      if (result.nodes.some(n => n.kind !== 'file')) filesWithNodes++;
     }
-    expect(filesWithNodes).toBeGreaterThanOrEqual(Math.floor(zigFiles.length * 0.3));
+    expect(filesWithNodes).toBeGreaterThan(zigFiles.length / 2);
   });
 
-  it('should track function calls across files', () => {
+  it('should extract call references (resolution is tested separately)', () => {
     let totalCalls = 0;
     for (const filePath of zigFiles) {
       const code = fs.readFileSync(filePath, 'utf8');

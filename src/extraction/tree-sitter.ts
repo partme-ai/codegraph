@@ -23,7 +23,7 @@ import type { LanguageExtractor, ExtractorContext } from './tree-sitter-types';
 import { EXTRACTORS } from './languages';
 import { stripCppTemplateArgs, isCppConstructorDeclaration } from './languages/c-cpp';
 import { rustImplTypeName } from './languages/rust';
-import { collectZigTypeNames } from './languages/zig';
+import { collectZigTypeNames, zigImportCandidates, zigExpressionName } from './languages/zig';
 import { LiquidExtractor } from './liquid-extractor';
 import { RazorExtractor } from './razor-extractor';
 import { SvelteExtractor } from './svelte-extractor';
@@ -2389,7 +2389,17 @@ export class TreeSitterExtractor {
         });
         // Same as the declarator paths: emit `references` to the field's
         // annotated type (#381).
-        if (fieldNode) this.extractTypeAnnotations(node, fieldNode.id);
+        if (fieldNode) {
+          this.extractTypeAnnotations(node, fieldNode.id);
+          if (this.language === 'zig') {
+            const initializer = node.namedChildren.find((c, i) => i > 0 && c.id !== typeNode?.id);
+            if (initializer) {
+              this.nodeStack.push(fieldNode.id);
+              this.visitFunctionBody(initializer, fieldNode.id);
+              this.nodeStack.pop();
+            }
+          }
+        }
       }
     }
   }
@@ -4556,17 +4566,18 @@ export class TreeSitterExtractor {
       // - `@call(.auto, fn, args)` names its second-argument callee.
       if (node.type === 'builtin_function') {
         const text = getNodeText(node, this.source);
-        if (/@import\s*\(|@embedFile\s*\(|@cInclude\s*\(|@cImport\s*\(/.test(text)) return;
+        if (/^@(?:import|embedFile|cInclude|cImport)\s*\(/.test(text)) return;
         const call = text.match(/^@call\s*\(/);
         if (call) {
           const args = node.namedChildren.find((c: SyntaxNode) => c.type === 'arguments');
-          const callable = args?.namedChild(1);
+          const callable = args?.namedChildren.filter(c => c.type !== 'comment')[1];
           if (callable?.type === 'identifier' || callable?.type === 'field_expression') {
-            const name = getNodeText(callable, this.source).replace(/\s+/g, '');
+            const name = zigExpressionName(callable);
             if (name) {
               this.unresolvedReferences.push({
                 fromNodeId: callerId,
                 referenceName: name,
+                candidates: zigImportCandidates(callable, name),
                 referenceKind: 'calls',
                 line: node.startPosition.row + 1,
                 column: node.startPosition.column,
@@ -4589,12 +4600,13 @@ export class TreeSitterExtractor {
       }
       const zigFn = getChildByField(node, 'function');
       if (zigFn) {
-        let callee = getNodeText(zigFn, this.source).replace(/\s+/g, '');
+        let callee = zigExpressionName(zigFn);
         if (callee.startsWith('!')) callee = callee.replace(/^!+/, '');
         if (callee) {
           this.unresolvedReferences.push({
             fromNodeId: callerId,
             referenceName: callee,
+            candidates: zigImportCandidates(node, callee),
             referenceKind: 'calls',
             line: node.startPosition.row + 1,
             column: node.startPosition.column,
@@ -5930,6 +5942,14 @@ export class TreeSitterExtractor {
     const visitForCallsAndStructure = (node: SyntaxNode): void => {
       const nodeType = node.type;
 
+      if (this.language === 'zig' && nodeType === 'builtin_function' &&
+          this.extractor!.visitNode?.(node, this.makeExtractorContext())) return;
+
+      if (this.language === 'zig' && nodeType === 'variable_declaration') {
+        const ownerId = this.nodeStack[this.nodeStack.length - 1];
+        if (ownerId) this.extractTypeAnnotations(node, ownerId);
+      }
+
       // A function-like macro defined inside a body is still a macro (#1838).
       if ((this.language === 'c' || this.language === 'cpp') && nodeType === 'preproc_function_def') {
         this.visitNode(node);
@@ -6667,6 +6687,7 @@ export class TreeSitterExtractor {
             referenceKind: 'references',
             line: ref.line,
             column: ref.column,
+            candidates: ref.candidates,
           });
         }
       }
@@ -6679,6 +6700,7 @@ export class TreeSitterExtractor {
             referenceKind: 'references',
             line: ref.line,
             column: ref.column,
+            candidates: ref.candidates,
           });
         }
       }
