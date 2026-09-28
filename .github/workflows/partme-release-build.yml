@@ -2,10 +2,10 @@ name: PartMe release build
 on:
   workflow_dispatch:
   push:
-    paths:
-      - '.github/workflows/partme-release-build.yml'
-      - 'scripts/prepare-partme-release.mjs'
-      - '__tests__/partme-release.test.ts'
+    tags: ['v*-zig*']
+concurrency:
+  group: partme-release-${{ github.ref }}
+  cancel-in-progress: true
 permissions:
   contents: read
 jobs:
@@ -34,7 +34,12 @@ jobs:
           node-version: 24
           cache: npm
       - name: Stage fork distribution
-        run: CODEGRAPH_RELEASE_STAGE=1 node scripts/prepare-partme-release.mjs .
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == tag && "$GITHUB_REF_NAME" != v1.6.0-zig ]]; then
+            echo 'Update the declared release version before tagging a new distribution.' >&2
+            exit 1
+          fi
+          CODEGRAPH_RELEASE_STAGE=1 node scripts/prepare-partme-release.mjs .
       - run: npm ci
       - name: Build native extraction kernel
         run: bash scripts/build-kernel.sh --target '${{ matrix.triple }}'

@@ -20,3 +20,11 @@ All six archives and SHA256SUMS are attached to the GitHub prerelease. Publish
 platform packages before the main shim, then verify registry metadata and an
 isolated `npx` execution. Do not publish the root source package or the private
 UI component workspace.
+
+Build policy: ordinary branch pushes and pull requests must not launch builds.
+The fork distribution workflow runs only on `v*-zig*` tags or manual dispatch;
+Zig validation is manual/reusable only. Do not also subscribe to release events,
+which would build the same version twice. Reuse successful immutable artifacts
+when only documentation or workflow triggers change. For this already-built
+release, the trigger-only commit uses `[skip ci]` so creating its tag does not
+repeat the six native builds. The release notes identify the tested source SHA.

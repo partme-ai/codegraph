@@ -354,7 +354,8 @@ The runtime gate also rejects deliberately corrupted reports containing a
 skip, a reduced test denominator, or a missing suite. The platform matrix uses
 native runner labels from [GitHub's runner reference](https://docs.github.com/en/actions/reference/runners/github-hosted-runners),
 and validates packed production dependencies on each platform. The workflow
-has push, pull-request and manual triggers and remains a required dependency
+now has manual/reusable triggers only (ordinary pushes and PRs do not build),
+and remains a required dependency
 of the existing release workflow. Running validation does not publish a release.
 
 Local and remote evidence must remain distinct: adding the matrix is not proof

@@ -2,24 +2,6 @@ name: Zig validation
 on:
   workflow_call:
   workflow_dispatch:
-  push:
-    paths:
-      - 'src/**'
-      - '__tests__/zig*'
-      - '__tests__/fixtures/zig*'
-      - 'scripts/**'
-      - 'docs/grammars/**'
-      - 'package*.json'
-      - '.github/workflows/zig-validation.yml'
-  pull_request:
-    paths:
-      - 'src/**'
-      - '__tests__/zig*'
-      - '__tests__/fixtures/zig*'
-      - 'scripts/**'
-      - 'docs/grammars/**'
-      - 'package*.json'
-      - '.github/workflows/zig-validation.yml'
 permissions:
   contents: read
 jobs:
