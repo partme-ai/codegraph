@@ -11,7 +11,7 @@ import * as fsp from 'fs/promises';
 import { Parser, Language as WasmLanguage } from 'web-tree-sitter';
 import { Language } from '../types';
 
-export type GrammarLanguage = Exclude<Language, 'svelte' | 'vue' | 'astro' | 'liquid' | 'razor' | 'yaml' | 'twig' | 'xml' | 'properties' | 'unknown'>;
+export type GrammarLanguage = Exclude<Language, 'svelte' | 'vue' | 'astro' | 'liquid' | 'razor' | 'yaml' | 'twig' | 'xml' | 'properties' | 'zon' | 'unknown'>;
 
 /**
  * WASM filename map — maps each language to its .wasm grammar file
@@ -125,7 +125,10 @@ export const EXTENSION_MAP: Record<string, Language> = {
   '.m': 'objc',
   '.mm': 'objc',
   '.zig': 'zig',
-  '.zon': 'zig',
+  // build.zig.zon package manifests: data files, tracked at file level only
+  // (parsing them with the zig grammar mints a node named after the whole
+  // file body — the isFileLevelOnlyLanguage 'zon' branch stores just the file).
+  '.zon': 'zon',
   '.sol': 'solidity',
   // CFML: .cfc/.cfm parse with the tag-aware `cfml` grammar (custom CfmlExtractor
   // dialect-switches to cfscript for bare-script content); .cfs is pure CFScript.
@@ -591,6 +594,7 @@ export function isLanguageSupported(language: Language): boolean {
   if (language === 'liquid') return true; // custom regex extractor
   if (language === 'razor') return true; // custom RazorExtractor (.cshtml/.razor markup)
   if (language === 'yaml') return true; // file-level tracking only; Drupal routing extraction via framework resolver
+  if (language === 'zon') return true; // file-level tracking only (.zon package manifests)
   if (language === 'twig') return true; // file-level tracking only
   if (language === 'xml') return true; // MyBatis mapper extractor
   if (language === 'properties') return true; // Spring config keys
@@ -603,7 +607,7 @@ export function isLanguageSupported(language: Language): boolean {
  */
 export function isGrammarLoaded(language: Language): boolean {
   if (language === 'svelte' || language === 'vue' || language === 'astro' || language === 'liquid' || language === 'razor') return true;
-  if (language === 'yaml' || language === 'twig') return true; // no WASM grammar needed
+  if (language === 'yaml' || language === 'twig' || language === 'zon') return true; // no WASM grammar needed
   if (language === 'xml' || language === 'properties') return true; // no WASM grammar needed
   return languageCache.has(language);
 }
@@ -618,7 +622,7 @@ export function isGrammarLoaded(language: Language): boolean {
  * indexed rather than skipped, so it must stay in sync with that branch.
  */
 export function isFileLevelOnlyLanguage(language: Language): boolean {
-  return language === 'yaml' || language === 'twig' || language === 'properties';
+  return language === 'yaml' || language === 'twig' || language === 'properties' || language === 'zon';
 }
 
 /**
@@ -700,6 +704,7 @@ export function getLanguageDisplayName(language: Language): string {
     luau: 'Luau',
     objc: 'Objective-C',
     zig: 'Zig',
+    zon: 'Zig Object Notation',
     solidity: 'Solidity',
     nix: 'Nix',
     yaml: 'YAML',

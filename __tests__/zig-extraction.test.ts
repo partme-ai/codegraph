@@ -18,12 +18,13 @@ describe('Zig Language Detection', () => {
     expect(detectLanguage('main.zig')).toBe('zig');
   });
 
-  it('should detect .zon files as zig', () => {
-    expect(detectLanguage('build.zig.zon')).toBe('zig');
+  it('should detect .zon files as zon (file-level tracking only)', () => {
+    expect(detectLanguage('build.zig.zon')).toBe('zon');
   });
 
   it('should report zig as supported', () => {
     expect(isLanguageSupported('zig')).toBe(true);
+    expect(isLanguageSupported('zon')).toBe(true);
   });
 });
 
@@ -277,15 +278,17 @@ var mutable: u32 = 0;
 });
 
 describe('Zig @import Detection', () => {
-  it('should detect @import calls and create import references', () => {
+  it('should mint import references for file imports but not compiler modules', () => {
     const code = `
 const std = @import("std");
+const other = @import("other.zig");
 const testing = @import("std").testing;
 `;
     const result = extractFromSource('imports.zig', code);
     const refs = result.unresolvedReferences.filter((r) => r.referenceKind === 'imports');
-    expect(refs.length).toBeGreaterThanOrEqual(1);
-    expect(refs.some((r) => r.referenceName === 'std')).toBe(true);
+    expect(refs.some((r) => r.referenceName === 'other.zig')).toBe(true);
+    // std/builtin/root are compiler-provided — never minted, they cannot resolve.
+    expect(refs.some((r) => r.referenceName === 'std')).toBe(false);
   });
 });
 
@@ -342,7 +345,7 @@ const testing = @import("std").testing;
 `;
     const result = extractFromSource('stdtest.zig', code);
     const refs = result.unresolvedReferences.filter((r) => r.referenceKind === 'imports');
-    expect(refs.some((r) => r.referenceName === 'std')).toBe(true);
+    expect(refs.some((r) => r.referenceName === 'std')).toBe(false);
   });
 });
 
@@ -1002,7 +1005,7 @@ const testing = @import("std").testing;
 `;
     const result = extractFromSource('import_hook.zig', code);
     const refs = result.unresolvedReferences.filter((r) => r.referenceKind === 'imports');
-    expect(refs.some((r) => r.referenceName === 'std')).toBe(true);
+    expect(refs.some((r) => r.referenceName === 'std')).toBe(false);
   });
 });
 
@@ -1018,5 +1021,91 @@ fn print(comptime fmt: []const u8, args: anytype) void {
     const funcs = result.nodes.filter((n) => n.kind === 'function');
     expect(funcs.length).toBe(1);
     expect(funcs[0]?.name).toBe('print');
+  });
+});
+
+describe('Zig Generic Type Functions', () => {
+  const CODE = `
+pub fn Container(comptime T: type) type {
+    return struct {
+        items: []T,
+        pub fn get(self: @This(), i: usize) T {
+            return self.items[i];
+        }
+    };
+}
+const IntContainer = Container(i32);
+const inst = IntContainer{ .items = &[_]i32{1} };
+`;
+
+  it('should extract the returned container as a struct named after the function', () => {
+    const result = extractFromSource('generic_type.zig', CODE);
+    const structs = result.nodes.filter((n) => n.kind === 'struct' && n.name === 'Container');
+    expect(structs.length).toBe(1);
+    expect(structs[0]?.qualifiedName).toBe('Container::Container');
+  });
+
+  it('should extract the returned container fields and methods with qualified names', () => {
+    const result = extractFromSource('generic_type.zig', CODE);
+    const field = result.nodes.find((n) => n.kind === 'field' && n.name === 'items');
+    const method = result.nodes.find((n) => n.kind === 'method' && n.name === 'get');
+    expect(field?.qualifiedName).toBe('Container::Container::items');
+    expect(method?.qualifiedName).toBe('Container::Container::get');
+  });
+
+  it('should record the type-instantiating call and the struct instantiation', () => {
+    const result = extractFromSource('generic_type.zig', CODE);
+    const calls = result.unresolvedReferences.filter((r) => r.referenceKind === 'calls');
+    const instantiates = result.unresolvedReferences.filter((r) => r.referenceKind === 'instantiates');
+    expect(calls.some((r) => r.referenceName === 'Container')).toBe(true);
+    expect(instantiates.some((r) => r.referenceName === 'IntContainer')).toBe(true);
+  });
+
+  it('should mint the function node itself (the callable callers resolve to)', () => {
+    const result = extractFromSource('generic_type.zig', CODE);
+    const fnNode = result.nodes.find((n) => n.kind === 'function' && n.name === 'Container');
+    expect(fnNode).toBeDefined();
+  });
+});
+
+describe('Zig Value Declarations', () => {
+  it('should record calls and instantiations from top-level const initializers', () => {
+    const code = `
+fn makePoint() Point { return Point{ .x = 1, .y = 2 }; }
+const p = makePoint();
+const arr = [_]i32{1, 2, 3};
+`;
+    const result = extractFromSource('init_calls.zig', code);
+    const calls = result.unresolvedReferences.filter((r) => r.referenceKind === 'calls');
+    const instantiates = result.unresolvedReferences.filter((r) => r.referenceKind === 'instantiates');
+    expect(calls.some((r) => r.referenceName === 'makePoint')).toBe(true);
+    expect(instantiates.some((r) => r.referenceName === 'Point')).toBe(true);
+    const consts = result.nodes.filter((n) => n.kind === 'constant');
+    expect(consts.map((n) => n.name)).toContain('p');
+  });
+});
+
+describe('Zig Parse-Hygiene Guards', () => {
+  it('should not mint nodes from error-recovery shapes (comptime var)', () => {
+    const code = `
+comptime var count: u32 = 0;
+const k: u32 = 7;
+`;
+    const result = extractFromSource('ctvar.zig', code);
+    expect(result.nodes.some((n) => n.name === 'var')).toBe(false);
+    expect(result.nodes.some((n) => n.kind === 'field' && n.name === 'var')).toBe(false);
+    expect(result.nodes.some((n) => n.kind === 'constant' && n.name === 'k')).toBe(true);
+  });
+
+  it('should strip the negation operator from a call reference name', () => {
+    const code = `
+fn check(a: []const u8, b: []const u8) bool {
+    return !std.mem.eql(u8, a, b);
+}
+`;
+    const result = extractFromSource('negcall.zig', code);
+    const calls = result.unresolvedReferences.filter((r) => r.referenceKind === 'calls');
+    expect(calls.some((r) => r.referenceName === 'std.mem.eql')).toBe(true);
+    expect(calls.some((r) => r.referenceName.startsWith('!'))).toBe(false);
   });
 });

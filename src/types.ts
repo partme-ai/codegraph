@@ -105,6 +105,7 @@ export const LANGUAGES = [
   'luau',
   'objc',
   'zig',
+  'zon',
   'r',
   'solidity',
   'nix',

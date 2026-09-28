@@ -50,6 +50,14 @@ const ZIG_BUILTIN_TYPES = new Set([
 /** Receivers to strip from method calls (self.method → method). */
 const SKIP_RECEIVERS = new Set(['self', 'this', 'super']);
 
+/**
+ * Compiler-provided modules (@import("std") etc.) — provided by the toolchain,
+ * never an in-repo file. No import node/ref is minted for them: the ref could
+ * only ever fail resolution, and the resolution layer additionally filters the
+ * dotted uses (std.mem.eql) as external.
+ */
+const COMPILER_MODULES = new Set(['std', 'builtin', 'root']);
+
 // ── Generic AST helpers ───────────────────────────────────────────────
 
 function hasKeyword(node: SyntaxNode, keyword: string): boolean {
@@ -83,7 +91,12 @@ function buildFieldChain(node: SyntaxNode, source: string): string {
   if (object && object.type === 'field_expression') {
     return buildFieldChain(object, source) + '.' + memberName;
   }
-  const objectName = object ? getNodeText(object, source) : '';
+  let objectName = object ? getNodeText(object, source) : '';
+  // `!std.mem.eql(...)`: the grammar parses a negated receiver chain's root as
+  // error_union_type (`!std`) — strip the operator so the ref name stays `std.mem.eql`.
+  if (object?.type === 'error_union_type' && objectName.startsWith('!')) {
+    objectName = objectName.slice(1);
+  }
   if (objectName && memberName) {
     if (SKIP_RECEIVERS.has(objectName)) return memberName;
     return objectName + '.' + memberName;
@@ -260,6 +273,10 @@ function isInsideContainer(nodeStack: readonly string[], nodes: ReadonlyArray<{ 
 
 function walkBodyForCalls(body: SyntaxNode, functionId: string, ctx: ExtractorContext): void {
   const visit = (node: SyntaxNode): void => {
+    // Type declarations (e.g. the struct a generic `fn ... type` returns, or a
+    // container declared inside a body) are their own scopes: their members'
+    // calls attribute to the member nodes, not to the enclosing function.
+    if (ZIG_TYPE_DECL_TYPES.has(node.type)) return;
     if (node.type === 'call_expression') {
       const func = node.namedChild(0);
       if (!func) return;
@@ -271,6 +288,9 @@ function walkBodyForCalls(body: SyntaxNode, functionId: string, ctx: ExtractorCo
       } else {
         calleeName = ctx.source.substring(func.startIndex, func.endIndex);
       }
+      // Negated calls (`!isRetryable(err)`, `!std.mem.eql(...)`) parse with the
+      // `!` inside the callee node — strip it so the ref name is the real call.
+      calleeName = calleeName.replace(/^!+/, '');
       if (calleeName) {
         ctx.addUnresolvedReference({
           fromNodeId: functionId,
@@ -429,6 +449,19 @@ function handleFunctionDeclaration(node: SyntaxNode, ctx: ExtractorContext): boo
   if (!fnNode) return true;
 
   ctx.pushScope(fnNode.id);
+
+  // Generic type function: `pub fn Container(comptime T: type) type { return struct {...} }`
+  // — the returned container takes the function's name, so its fields/methods
+  // become searchable (and callers' `Container(i32)` uses resolve to the fn).
+  const returnsType = returnType?.type === 'builtin_type' &&
+    getNodeText(returnType, ctx.source) === 'type';
+  if (returnsType) {
+    const typeDecl = findReturnedTypeDecl(body);
+    if (typeDecl) {
+      emitTypeDeclaration(typeDecl, typeDecl, name, isPub || isExport, ctx, { typeFunction: true });
+    }
+  }
+
   walkBodyForCalls(body, fnNode.id, ctx);
   extractFnTypeRefs(node, fnNode.id, ctx);
   ctx.popScope();
@@ -463,6 +496,37 @@ function handleVariableDeclaration(node: SyntaxNode, ctx: ExtractorContext): boo
   // Type alias: const Name = type_expression (not a struct/enum/opaque).
   if (handleTypeAlias(node, name, ctx)) return true;
 
+  // Value declaration (`const sum = add(1, 2)`, `const inst = Point{...}`):
+  // mint the constant/variable node here and walk the initializer so its calls
+  // and struct instantiations enter the graph — including the type-instantiating
+  // form `const IntContainer = Container(i32)` of a generic type function.
+  if (name) {
+    let initializer: SyntaxNode | null = null;
+    let pastName = false;
+    for (let i = 0; i < node.namedChildCount; i++) {
+      const child = node.namedChild(i);
+      if (!child) continue;
+      if (!pastName && child.type === 'identifier') { pastName = true; continue; }
+      if (node.fieldNameForNamedChild(i) === 'type') continue;
+      initializer = child;
+      break;
+    }
+    const isConst = hasKeyword(node, 'const');
+    const isPub = hasKeyword(node, 'pub');
+    const initText = initializer
+      ? ctx.source.substring(initializer.startIndex, Math.min(initializer.endIndex, initializer.startIndex + 100))
+      : '';
+    const varNode = ctx.createNode(isConst ? 'constant' : 'variable', name, node, {
+      visibility: isPub ? 'public' : 'private',
+      isExported: isPub,
+      ...(initText && { signature: initText }),
+    });
+    if (varNode) {
+      if (initializer) walkBodyForCalls(initializer, varNode.id, ctx);
+      return true;
+    }
+  }
+
   return false;
 }
 
@@ -472,15 +536,32 @@ function handleTypeDeclaration(
   valueNode: SyntaxNode,
   ctx: ExtractorContext,
 ): boolean {
-  const isPub = hasKeyword(node, 'pub');
+  return emitTypeDeclaration(node, valueNode, name, hasKeyword(node, 'pub'), ctx);
+}
+
+/**
+ * Mint a container type node (struct/enum) for `valueNode` and visit its members.
+ * Shared by `const X = struct {...}` declarations and by the type a generic
+ * `fn X(...) type { return struct {...} }` returns — in Zig the returned
+ * anonymous container IS the type callers use, so it takes the function's name.
+ */
+function emitTypeDeclaration(
+  positionNode: SyntaxNode,
+  valueNode: SyntaxNode,
+  name: string,
+  isPub: boolean,
+  ctx: ExtractorContext,
+  extraMeta?: Record<string, unknown>,
+): boolean {
   const isEnum = valueNode.type === 'enum_declaration' || valueNode.type === 'error_set_declaration';
   const isTaggedUnion = valueNode.type === 'union_declaration' && hasKeyword(valueNode, 'enum');
   const kind = isEnum ? 'enum' : 'struct';
 
   const meta: Record<string, unknown> = {};
   if (isTaggedUnion) meta.taggedUnion = true;
+  if (extraMeta) Object.assign(meta, extraMeta);
 
-  const typeNode = ctx.createNode(kind, name, node, {
+  const typeNode = ctx.createNode(kind, name, positionNode, {
     visibility: isPub ? 'public' : 'private',
     isExported: isPub,
     ...(Object.keys(meta).length > 0 && { metadata: meta }),
@@ -506,6 +587,26 @@ function handleTypeDeclaration(
 }
 
 /**
+ * A `fn ...(comptime T: type, ...) type` returns a container type — find the
+ * first `return struct {...}` / `return enum {...}` / union/opaque/error-set
+ * declaration in the body (the Zig convention: the returned type carries the
+ * function's name, e.g. std's `HashMap(K, V)`).
+ */
+function findReturnedTypeDecl(body: SyntaxNode): SyntaxNode | null {
+  let found: SyntaxNode | null = null;
+  const visit = (node: SyntaxNode): void => {
+    if (found) return;
+    if (ZIG_TYPE_DECL_TYPES.has(node.type)) { found = node; return; }
+    for (let i = 0; i < node.namedChildCount; i++) {
+      const child = node.namedChild(i);
+      if (child) visit(child);
+    }
+  };
+  visit(body);
+  return found;
+}
+
+/**
  * Handle @import, @embedFile, and @cImport inside a variable_declaration.
  * Returns true if the node was fully handled.
  */
@@ -522,6 +623,7 @@ function handleImports(node: SyntaxNode, ctx: ExtractorContext): boolean {
         const m = ctx.source.substring(child.startIndex, child.endIndex).match(/@import\s*\(\s*"([^"]+)"\s*\)/);
         if (m) {
           const moduleName = m[1]!;
+          if (COMPILER_MODULES.has(moduleName)) return true;
           const sig = ctx.source.substring(node.startIndex, Math.min(node.endIndex, node.startIndex + 80)).trim();
           const importId = ctx.createNode('import', moduleName, node, { signature: sig });
           if (importId) {
@@ -582,6 +684,7 @@ function handleImports(node: SyntaxNode, ctx: ExtractorContext): boolean {
         const m = text.match(/@import\s*\(\s*"([^"]+)"\s*\)/);
         if (m) {
           const moduleName = m[1]!;
+          if (COMPILER_MODULES.has(moduleName)) return true;
           const sig = ctx.source.substring(node.startIndex, Math.min(node.endIndex, node.startIndex + 80)).trim();
           const importId = ctx.createNode('import', moduleName, node, { signature: sig });
           if (importId) {
@@ -670,6 +773,7 @@ function handleBuiltinImport(node: SyntaxNode, ctx: ExtractorContext): boolean {
   const m = text.match(/@import\s*\(\s*"([^"]+)"\s*\)/);
   if (m) {
     const moduleName = m[1]!;
+    if (COMPILER_MODULES.has(moduleName)) return true;
     const importId = ctx.createNode('import', moduleName, node, { signature: text.trim() });
     if (importId) {
       ctx.addUnresolvedReference({
@@ -808,6 +912,11 @@ export const zigExtractor: LanguageExtractor = {
 
   visitNode: (node, ctx) => {
     switch (node.type) {
+      // Error-recovery shapes must not mint nodes: their children carry garbage
+      // names (e.g. `comptime var x: u32 = 0;` — unsupported by this grammar —
+      // recovers into a container_field named "var").
+      case 'ERROR':
+        return true;
       case 'function_declaration':
         return handleFunctionDeclaration(node, ctx);
       case 'variable_declaration':

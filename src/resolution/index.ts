@@ -2348,9 +2348,10 @@ export class ReferenceResolver {
       // @-prefixed compiler builtins: @import, @sizeOf, @intFromPtr, etc.
       if (name.startsWith('@')) return true;
       // std library namespace: std.debug.print, std.mem.eql, std.ArrayList, etc.
-      if (name.startsWith('std.')) return true;
-      // builtin module: builtin.is_test, builtin.mode, etc.
-      if (name.startsWith('builtin.')) return true;
+      // The bare `std` is the @import("std") module itself (an imports ref).
+      if (name === 'std' || name.startsWith('std.')) return true;
+      // builtin module: builtin.is_test, builtin.mode, etc. — same bare/import form.
+      if (name === 'builtin' || name.startsWith('builtin.')) return true;
       // root module reference
       if (name === 'root') return true;
     }
