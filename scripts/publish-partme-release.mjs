@@ -4,6 +4,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import assert from 'node:assert/strict';
+import { setTimeout as delay } from 'node:timers/promises';
 const version = '1.6.0-zig';
 const targets = ['darwin-arm64','darwin-x64','linux-arm64','linux-x64','win32-arm64','win32-x64'];
 const root = process.cwd(), release = path.join(root, 'release');
@@ -32,21 +33,47 @@ const archives=targets.map(t=>`codegraph-${t}${t.startsWith('win32')?'.zip':'.ta
 fs.writeFileSync(path.join(release,'SHA256SUMS'),archives.map(f=>crypto.createHash('sha256').update(fs.readFileSync(path.join(release,f))).digest('hex')+'  '+f).join('\n')+'\n');
 fs.copyFileSync('install.sh',path.join(release,'install.sh'));fs.copyFileSync('install.ps1',path.join(release,'install.ps1'));
 fs.writeFileSync(path.join(release,'BUILD.json'),JSON.stringify({version,package:'@partme.ai/codegraph',sourceCommit:build.head_sha,releaseCommit:'480d848812a73b69afb274ea90cd8f197c8d0c52',buildRun:build.html_url,publishRun:`https://github.com/partme-ai/codegraph/actions/runs/${process.env.GITHUB_RUN_ID}`,validationRun:validation.html_url,targets},null,2)+'\n');
-// Finish the draft's assets before exposing the main npm launcher. Uploading
-// identical artifacts is safe to retry; no compilation happens in this job.
-run('gh',['release','upload','v'+version,...[...archives,'SHA256SUMS','BUILD.json','install.sh','install.ps1','npm-pack-report.json'].map(f=>path.join(release,f)),'--clobber'],{stdio:'inherit'});
+// Preserve assets once public. BUILD.json records the original upload job;
+// later publish-only retries must not rewrite that provenance.
+const publishedRelease=JSON.parse(run('gh',['api',`repos/partme-ai/codegraph/releases/tags/v${version}`]));
+for(const file of [...archives,'SHA256SUMS','BUILD.json','install.sh','install.ps1','npm-pack-report.json']) {
+ const asset=publishedRelease.assets.find(a=>a.name===file);
+ if(asset) {
+   assert.equal(asset.state,'uploaded');
+   if(file==='BUILD.json') {
+     const previous=JSON.parse(run('gh',['api',asset.url,'-H','Accept: application/octet-stream']));
+     assert.equal(previous.version,version);assert.equal(previous.sourceCommit,build.head_sha);
+     assert.equal(previous.buildRun,build.html_url);assert.deepEqual(previous.targets,targets);
+   } else {
+     const digest='sha256:'+crypto.createHash('sha256').update(fs.readFileSync(path.join(release,file))).digest('hex');
+     assert.equal(asset.digest,digest,`Published release asset differs: ${file}`);
+   }
+   console.log(`Preserved verified release asset: ${file}`);
+ } else {
+   run('gh',['release','upload','v'+version,path.join(release,file)],{stdio:'inherit'});
+ }
+}
+function readPackage(name) {
+ try {return JSON.parse(run('npm',['view',`${name}@${version}`,'--json','--prefer-online'],{stdio:['ignore','pipe','pipe']}));}
+ catch(e) {if(!String(e.stderr).includes('E404'))throw e;return null;}
+}
 for (const p of reports) {
- let existing;
- try {existing=JSON.parse(run('npm',['view',`${p.name}@${version}`,'--json'],{stdio:['ignore','pipe','pipe']}));}
- catch(e) {if(!String(e.stderr).includes('E404'))throw e;}
+ const existing=readPackage(p.name);
  if(existing) {
    assert.equal(existing.version,version);
    assert.equal(existing.dist.integrity,p.integrity,`Existing package differs: ${p.name}`);
    console.log(`Already published and verified: ${p.name}@${version}`);
  } else {
-   run('npm',['publish',path.join(out,p.filename),'--access','public','--tag','latest','--provenance'],{stdio:'inherit'});
+   run('npm',['publish',path.join(out,p.filename),'--access','public','--tag','latest','--provenance','--json','--loglevel=http'],{stdio:'inherit'});
  }
- const actual=JSON.parse(run('npm',['view',`${p.name}@${version}`,'--json']));
+ let actual=readPackage(p.name);
+ for(let attempt=1;!actual && attempt<=12;attempt++) {
+   console.log(`Waiting for registry visibility: ${p.name} (${attempt}/12)`);
+   await delay(10000);
+   actual=readPackage(p.name);
+ }
+ assert.ok(actual,`Publish was reported successful but ${p.name}@${version} is still absent after 120 seconds; inspect npm before retrying.`);
+ assert.equal(actual.version,version);
  assert.equal(actual.dist.integrity,p.integrity);
  if(actual['dist-tags']?.latest!==version)run('npm',['dist-tag','add',`${p.name}@${version}`,'latest'],{stdio:'inherit'});
 }
