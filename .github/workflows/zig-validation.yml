@@ -51,18 +51,22 @@ jobs:
       - name: Packed production artifact
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/zig-package"
-          npm pack --pack-destination "$RUNNER_TEMP/zig-package"
+          package_dir="$RUNNER_TEMP/zig-package"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            package_dir=$(cygpath -u "$package_dir")
+          fi
+          mkdir -p "$package_dir"
+          npm pack --pack-destination "$package_dir"
           version=$(node -p "require('./package.json').version")
           # Read stdin so GNU tar does not interpret a Windows drive letter as
           # a remote archive host (D:...). This also works with BSD tar.
-          tar -xzf - -C "$RUNNER_TEMP/zig-package" < "$RUNNER_TEMP/zig-package/colbymchenry-codegraph-$version.tgz"
+          tar -xzf - -C "$package_dir" < "$package_dir/colbymchenry-codegraph-$version.tgz"
           # Pin dependency resolution to the reviewed lockfile; the tarball itself
           # supplies every runtime file and the grammar notice.
-          cp package-lock.json "$RUNNER_TEMP/zig-package/package/package-lock.json"
-          npm ci --omit=dev --ignore-scripts --prefix "$RUNNER_TEMP/zig-package/package"
-          node --liftoff-only scripts/check-zig-package.mjs "$RUNNER_TEMP/zig-package/package"
-          CODEGRAPH_PARALLEL_RESOLVE_MIN=0 node --liftoff-only scripts/check-zig-package.mjs "$RUNNER_TEMP/zig-package/package"
+          cp package-lock.json "$package_dir/package/package-lock.json"
+          npm ci --omit=dev --ignore-scripts --prefix "$package_dir/package"
+          node --liftoff-only scripts/check-zig-package.mjs "$package_dir/package"
+          CODEGRAPH_PARALLEL_RESOLVE_MIN=0 node --liftoff-only scripts/check-zig-package.mjs "$package_dir/package"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
