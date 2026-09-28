@@ -854,7 +854,7 @@ inline fn fastPath() void {}
     const funcs = result.nodes.filter((n) => n.kind === 'function');
     expect(funcs.length).toBe(1);
     expect(funcs[0]?.name).toBe('fastPath');
-    expect(funcs[0]?.metadata?.inline).toBe(true);
+    expect(funcs[0]?.decorators).toContain('inline');
   });
 
   it('should mark noinline fn in metadata', () => {
@@ -865,7 +865,7 @@ noinline fn slowPath() void {}
     const funcs = result.nodes.filter((n) => n.kind === 'function');
     expect(funcs.length).toBe(1);
     expect(funcs[0]?.name).toBe('slowPath');
-    expect(funcs[0]?.metadata?.noinline).toBe(true);
+    expect(funcs[0]?.decorators).toContain('noinline');
   });
 
   it('should capture callconv in function signature', () => {

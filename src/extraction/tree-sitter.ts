@@ -23,6 +23,7 @@ import type { LanguageExtractor, ExtractorContext } from './tree-sitter-types';
 import { EXTRACTORS } from './languages';
 import { stripCppTemplateArgs, isCppConstructorDeclaration } from './languages/c-cpp';
 import { rustImplTypeName } from './languages/rust';
+import { collectZigTypeNames } from './languages/zig';
 import { LiquidExtractor } from './liquid-extractor';
 import { RazorExtractor } from './razor-extractor';
 import { SvelteExtractor } from './svelte-extractor';
@@ -373,6 +374,7 @@ const INSTANTIATION_KINDS: ReadonlySet<string> = new Set([
   'composite_literal',               // go — `Widget{...}` / `pkga.Widget{...}`
   'struct_expression',               // rust — `Widget { n: 1 }` / `m::Widget { .. }`
   'instance_expression',             // scala — `new Monoid[Int] { ... }`
+  'struct_initializer',              // zig — `Widget{ .n = 1 }` / `pkg.Widget{...}`
 ]);
 
 /**
@@ -2374,11 +2376,20 @@ export class TreeSitterExtractor {
         || node.namedChildren.find(c => c.type === 'identifier');
       if (nameNode) {
         const name = getNodeText(nameNode, this.source);
-        this.createNode(fieldKind, name, node, {
+        // A `type`-typed field node (zig container_field and kin) carries
+        // its type beside the name — mirror the declarator paths'
+        // `Type name` signature so search finds the field by its type.
+        const typeNode = getChildByField(node, 'type');
+        const typeText = typeNode ? getNodeText(typeNode, this.source) : undefined;
+        const fieldNode = this.createNode(fieldKind, name, node, {
           docstring,
           visibility,
           isStatic,
+          ...(typeText && { signature: `${typeText} ${name}` }),
         });
+        // Same as the declarator paths: emit `references` to the field's
+        // annotated type (#381).
+        if (fieldNode) this.extractTypeAnnotations(node, fieldNode.id);
       }
     }
   }
@@ -4531,6 +4542,68 @@ export class TreeSitterExtractor {
       }
     }
 
+    if (this.language === 'zig') {
+      // Zig callee shapes the generic paths below mis-name:
+      // - a receiver chain (`std.mem.eql`, `Module.Type.method`) must keep
+      //   its full dotted path — the collapsed form loses the `std.` the
+      //   external filter needs, and the bare last segment would guess among
+      //   same-named methods (silent beats wrong);
+      // - a negated call (`!isRetryable(err)`, `!std.mem.eql(...)`) parses
+      //   the operator into the callee node — strip it;
+      // - `@`-builtins are compiler intrinsics: emit the `@name` call (the
+      //   resolution layer filters them as external); `@import`/`@embedFile`
+      //   are imports minted by the zig extractor, never calls;
+      // - `@call(.auto, fn, args)` names its second-argument callee.
+      if (node.type === 'builtin_function') {
+        const text = getNodeText(node, this.source);
+        if (/@import\s*\(|@embedFile\s*\(|@cInclude\s*\(|@cImport\s*\(/.test(text)) return;
+        const call = text.match(/^@call\s*\(/);
+        if (call) {
+          const args = node.namedChildren.find((c: SyntaxNode) => c.type === 'arguments');
+          const callable = args?.namedChild(1);
+          if (callable?.type === 'identifier' || callable?.type === 'field_expression') {
+            const name = getNodeText(callable, this.source).replace(/\s+/g, '');
+            if (name) {
+              this.unresolvedReferences.push({
+                fromNodeId: callerId,
+                referenceName: name,
+                referenceKind: 'calls',
+                line: node.startPosition.row + 1,
+                column: node.startPosition.column,
+              });
+            }
+          }
+          return;
+        }
+        const intrinsic = text.match(/^@[a-zA-Z_]\w*/);
+        if (intrinsic) {
+          this.unresolvedReferences.push({
+            fromNodeId: callerId,
+            referenceName: intrinsic[0],
+            referenceKind: 'calls',
+            line: node.startPosition.row + 1,
+            column: node.startPosition.column,
+          });
+        }
+        return;
+      }
+      const zigFn = getChildByField(node, 'function');
+      if (zigFn) {
+        let callee = getNodeText(zigFn, this.source).replace(/\s+/g, '');
+        if (callee.startsWith('!')) callee = callee.replace(/^!+/, '');
+        if (callee) {
+          this.unresolvedReferences.push({
+            fromNodeId: callerId,
+            referenceName: callee,
+            referenceKind: 'calls',
+            line: node.startPosition.row + 1,
+            column: node.startPosition.column,
+          });
+        }
+      }
+      return;
+    }
+
     // Get the function/method being called
     let calleeName = '';
 
@@ -6573,6 +6646,42 @@ export class TreeSitterExtractor {
     // parameter NAMES never accidentally surface as type refs (#381).
     if (this.language === 'csharp') {
       this.extractCsharpTypeRefs(node, nodeId);
+      return;
+    }
+
+    // Zig spells every type leaf as a plain `identifier` (not
+    // `type_identifier`), so the generic walker below emits nothing. Walk
+    // the parameter list, the return type, and — for a container_field —
+    // the field's own `type` field, via the identifier-aware collector the
+    // zig extractor exports (the rustImplTypeName import precedent).
+    if (this.language === 'zig') {
+      // The zig grammar does not field-name the parameter list — find it by
+      // node type (the language's getSignature does the same).
+      const params = getChildByField(node, this.extractor.paramsField || 'parameters')
+        ?? node.namedChildren.find((c: SyntaxNode) => c.type === 'parameters');
+      if (params) {
+        for (const ref of collectZigTypeNames(params, this.source)) {
+          this.unresolvedReferences.push({
+            fromNodeId: nodeId,
+            referenceName: ref.name,
+            referenceKind: 'references',
+            line: ref.line,
+            column: ref.column,
+          });
+        }
+      }
+      const returnType = getChildByField(node, this.extractor.returnField || 'type');
+      if (returnType) {
+        for (const ref of collectZigTypeNames(returnType, this.source)) {
+          this.unresolvedReferences.push({
+            fromNodeId: nodeId,
+            referenceName: ref.name,
+            referenceKind: 'references',
+            line: ref.line,
+            column: ref.column,
+          });
+        }
+      }
       return;
     }
 
