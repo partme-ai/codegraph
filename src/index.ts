@@ -48,6 +48,7 @@ import {
   SyncResult,
   extractFromSource,
   initGrammars,
+  loadGrammarsForLanguages,
 } from './extraction';
 import { detectLanguage, hasGrammarLoadFailure, isFileLevelOnlyLanguage, yieldsSymbols } from './extraction/grammars';
 import {
@@ -484,6 +485,7 @@ export class CodeGraph {
       throw err;
     }
     const queries = new QueryBuilder(db.getDb());
+    if (!options.readOnly && queries.getDistinctFileLanguages().has('zig')) await loadGrammarsForLanguages(['zig']);
 
     const instance = new CodeGraph(db, queries, resolvedRoot);
 

@@ -2492,6 +2492,8 @@ export class ExtractionOrchestrator {
     const parseWorkerPath = path.join(__dirname, 'parse-worker.js');
     const useWorker = fs.existsSync(parseWorkerPath);
 
+    // Zig alias/build resolution reads AST bindings on the coordinator too.
+    if (neededLanguages.includes('zig')) await loadGrammarsForLanguages(['zig']);
     let pool: ParseWorkerPool | null = null;
     if (useWorker) {
       // CODEGRAPH_PARSE_WORKERS: explicit worker count; 1 = the old single-worker
@@ -3757,6 +3759,7 @@ export class ExtractionOrchestrator {
     // to its importers, so it joins `addedFilePaths` once stored.
     const indexedFromSkip: string[] = [];
     const removedFilePaths: string[] = [];
+    const removedZigPaths: string[] = [];
     // `file\0name` definition pairs for the files this sync touches, sampled
     // BEFORE their nodes are replaced/deleted. Compared against the post-store
     // pairs below to derive `definitionDelta` (CG-33).
@@ -3867,6 +3870,7 @@ export class ExtractionOrchestrator {
       onFileChange?.(tracked.path);
       this.queries.deleteFile(tracked.path);
       removedFilePaths.push(tracked.path);
+      if (tracked.path.endsWith('.zig')) removedZigPaths.push(tracked.path);
       filesRemoved++;
     };
     const removed: FileRecord[] = [];
@@ -4032,6 +4036,19 @@ export class ExtractionOrchestrator {
     for (const pair of pairsBefore) if (!pairsAfter.has(pair)) deltaNames.add(nameOf(pair));
     for (const pair of pairsAfter) if (!pairsBefore.has(pair)) deltaNames.add(nameOf(pair));
     const definitionDelta = [...deltaNames];
+    // Alias targets may change without any definition name changing. Re-open
+    // source-proven dependent edges before the normal pending-reference pass.
+    const dependencyFiles = [...changedFilePaths.filter(f => f.endsWith('.zig')), ...removedZigPaths];
+    if (dependencyFiles.length) this.queries.retryFailedZigReferences();
+    const stale = this.queries.getZigDependencyEdges(dependencyFiles);
+    const ids: number[] = [];
+    const refs: UnresolvedReference[] = [];
+    for (const edge of stale) {
+      if (changedFilePaths.includes(edge.sourceFilePath)) continue;
+      const ref = resurrectRefFromDroppedEdge(edge);
+      if (ref) { ids.push(edge.edgeId); refs.push(ref); }
+    }
+    if (refs.length) this.queries.replaceResolutionEdgesWithUnresolvedRefs(ids, refs);
 
     // Modified ES modules whose `export … from` statements changed (#2978): a
     // re-export retargeted, removed or passing other names on changes what
