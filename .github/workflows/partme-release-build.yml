@@ -1,6 +1,15 @@
 name: PartMe release build
 on:
   workflow_dispatch:
+    inputs:
+      publish_only:
+        description: Reuse verified artifacts and publish without rebuilding
+        type: boolean
+        default: false
+      artifact_run:
+        description: Successful PartMe release build run
+        type: string
+        default: '36454692736'
   push:
     tags: ['v*-zig*']
 concurrency:
@@ -10,7 +19,7 @@ permissions:
   contents: read
 jobs:
   bundle:
-    if: github.repository == 'partme-ai/codegraph'
+    if: github.repository == 'partme-ai/codegraph' && inputs.publish_only != true
     name: Bundle (${{ matrix.target }})
     strategy:
       fail-fast: false
@@ -75,3 +84,50 @@ jobs:
             release/codegraph-*.zip
           if-no-files-found: error
           compression-level: 0
+
+  publish:
+    if: github.repository == 'partme-ai/codegraph' && github.event_name == 'workflow_dispatch' && inputs.publish_only == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      actions: read
+      id-token: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      ARTIFACT_RUN: ${{ inputs.artifact_run }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - name: Verify artifact source
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$ARTIFACT_RUN" --jq '{name,head_sha,status,conclusion}'
+          node -e "const cp=require('node:child_process'),a=require('node:assert/strict'),r=JSON.parse(cp.execFileSync('gh',['api','repos/'+process.env.GITHUB_REPOSITORY+'/actions/runs/'+process.env.ARTIFACT_RUN],{encoding:'utf8'}));a.equal(r.conclusion,'success');a.equal(r.head_sha,'1408a883265172a90a52fabd1ba2adfe6287a3eb');a.equal(r.name,'PartMe release build');"
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.artifact_run }}
+          pattern: partme-*
+          merge-multiple: true
+          path: release
+      - name: Assemble verified packages without compilation
+        run: |
+          CODEGRAPH_RELEASE_STAGE=1 node scripts/prepare-partme-release.mjs .
+          tar -xzf release/codegraph-linux-x64.tar.gz -C "$RUNNER_TEMP"
+          cp -R "$RUNNER_TEMP/codegraph-linux-x64/lib/dist" dist
+          bash scripts/pack-npm.sh 1.6.0-zig
+      - name: Publish npm packages and GitHub prerelease
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: node scripts/publish-partme-release.mjs
+      - name: Verify unversioned npx installation from registry
+        env:
+          CODEGRAPH_NO_DOWNLOAD: '1'
+        run: |
+          cd "$RUNNER_TEMP"
+          actual=$(npm exec --yes --cache "$RUNNER_TEMP/npm-smoke-cache" --package=@partme.ai/codegraph -- codegraph --version)
+          test "$actual" = '1.6.0-zig'
+          echo "Verified npx @partme.ai/codegraph -> $actual"
