@@ -87,4 +87,5 @@ it('has the same graph after alias, build, deletion and restoration edits as a c
     graph = await CodeGraph.recreate(dir); await graph.indexAll();
     expect(snapshot()).toEqual(incremental);
   }
-});
+// Three sync/rebuild cycles can exceed Vitest's 5s default on Windows ARM runners.
+}, 30000);
