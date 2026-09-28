@@ -88,7 +88,7 @@ jobs:
   publish:
     if: github.repository == 'partme-ai/codegraph' && github.event_name == 'workflow_dispatch' && inputs.publish_only == true
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     permissions:
       contents: write
       actions: read
@@ -115,7 +115,10 @@ jobs:
           path: release
       - name: Assemble verified packages without compilation
         run: |
-          CODEGRAPH_RELEASE_STAGE=1 node scripts/prepare-partme-release.mjs .
+          # Recovery of this immutable version must use its original packaging
+          # transform. Later README fixes apply to the next distribution only.
+          gh api "repos/$GITHUB_REPOSITORY/contents/scripts/prepare-partme-release.mjs?ref=1408a883265172a90a52fabd1ba2adfe6287a3eb" --jq .content | base64 --decode > "$RUNNER_TEMP/prepare-partme-release.mjs"
+          CODEGRAPH_RELEASE_STAGE=1 node "$RUNNER_TEMP/prepare-partme-release.mjs" .
           tar -xzf release/codegraph-linux-x64.tar.gz -C "$RUNNER_TEMP"
           cp -R "$RUNNER_TEMP/codegraph-linux-x64/lib/dist" dist
           bash scripts/pack-npm.sh 1.6.0-zig

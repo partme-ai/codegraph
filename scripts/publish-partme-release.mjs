@@ -57,25 +57,36 @@ function readPackage(name) {
  try {return JSON.parse(run('npm',['view',`${name}@${version}`,'--json','--prefer-online'],{stdio:['ignore','pipe','pipe']}));}
  catch(e) {if(!String(e.stderr).includes('E404'))throw e;return null;}
 }
-for (const p of reports) {
- const existing=readPackage(p.name);
- if(existing) {
-   assert.equal(existing.version,version);
-   assert.equal(existing.dist.integrity,p.integrity,`Existing package differs: ${p.name}`);
-   console.log(`Already published and verified: ${p.name}@${version}`);
- } else {
-   run('npm',['publish',path.join(out,p.filename),'--access','public','--tag','latest','--provenance','--json','--loglevel=http'],{stdio:'inherit'});
+// Upload the platform batch first, then wait for all of it to become visible.
+// Registry propagation has exceeded two minutes in this release. Waiting once
+// per batch avoids repeatedly starting jobs or serializing that delay six times.
+// The main launcher is withheld until all its optional dependencies are ready.
+for (const batch of [reports.slice(0,-1),reports.slice(-1)]) {
+ for (const p of batch) {
+   const existing=readPackage(p.name);
+   if(existing) {
+     assert.equal(existing.version,version);
+     assert.equal(existing.dist.integrity,p.integrity,`Existing package differs: ${p.name}`);
+     console.log(`Already published and verified: ${p.name}@${version}`);
+   } else {
+     run('npm',['publish',path.join(out,p.filename),'--access','public','--tag','latest','--provenance','--loglevel=warn'],{stdio:'inherit'});
+   }
  }
- let actual=readPackage(p.name);
- for(let attempt=1;!actual && attempt<=12;attempt++) {
-   console.log(`Waiting for registry visibility: ${p.name} (${attempt}/12)`);
-   await delay(10000);
-   actual=readPackage(p.name);
+ const pending=new Map(batch.map(p=>[p.name,p]));
+ for(let attempt=0;attempt<=30 && pending.size;attempt++) {
+   if(attempt>0)await delay(20000);
+   for(const [name,p] of pending) {
+     const actual=readPackage(name);
+     if(!actual)continue;
+     assert.equal(actual.version,version);
+     assert.equal(actual.dist.integrity,p.integrity);
+     if(actual['dist-tags']?.latest!==version)run('npm',['dist-tag','add',`${name}@${version}`,'latest'],{stdio:'inherit'});
+     pending.delete(name);
+     console.log(`Registry verified: ${name}@${version}`);
+   }
+   if(pending.size)console.log(`Waiting for registry visibility (${attempt}/30): ${[...pending.keys()].join(', ')}`);
  }
- assert.ok(actual,`Publish was reported successful but ${p.name}@${version} is still absent after 120 seconds; inspect npm before retrying.`);
- assert.equal(actual.version,version);
- assert.equal(actual.dist.integrity,p.integrity);
- if(actual['dist-tags']?.latest!==version)run('npm',['dist-tag','add',`${p.name}@${version}`,'latest'],{stdio:'inherit'});
+ assert.equal(pending.size,0,`Registry still lacks ${[...pending.keys()].join(', ')} after 10 minutes; inspect npm before retrying.`);
 }
 run('gh',['release','edit','v'+version,'--draft=false','--prerelease'],{stdio:'inherit'});
 console.log('Published and registry-verified all seven packages and the GitHub prerelease.');

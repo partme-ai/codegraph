@@ -28,3 +28,28 @@ which would build the same version twice. Reuse successful immutable artifacts
 when only documentation or workflow triggers change. For this already-built
 release, the trigger-only commit uses `[skip ci]` so creating its tag does not
 repeat the six native builds. The release notes identify the tested source SHA.
+
+Publication recovery uses the same workflow with `publish_only=true` and
+`artifact_run=36454692736`. This skips all native builds, checks that the source
+build and Zig validation succeeded at the same commit, and uses the repository's
+`NPM_TOKEN` secret to publish the staged packages. For this release:
+
+```sh
+gh workflow run partme-release-build.yml --repo partme-ai/codegraph \
+  --ref feat/zig-supported -f publish_only=true -f artifact_run=36454692736
+```
+
+The publisher checks exact npm tarball integrity before skipping existing
+versions, waits up to ten minutes per batch for new registry metadata, and fails
+if a version remains unavailable. Platform packages become visible before the
+main launcher is published. A successful `npm publish` exit alone is not
+release evidence. Already uploaded GitHub assets are verified and preserved;
+the original `BUILD.json` upload provenance is retained across retries.
+
+README packaging was corrected after `1.6.0-zig` had already begun publication.
+The next release will retain the complete upstream usage guide with PartMe
+installation commands and include a root README in each platform package. The
+staging regression test checks the generated npm package's file list. Do not
+replace existing npm versions to retrofit documentation. Recovery of
+`1.6.0-zig` deliberately loads its original staging transform from the verified
+build commit, preserving its published package integrity and release manifest.

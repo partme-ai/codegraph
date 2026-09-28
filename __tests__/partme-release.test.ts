@@ -28,5 +28,33 @@ it('stages fork identity without changing the contribution checkout', () => {
     expect(fs.readFileSync(path.join(stage, 'scripts/pack-npm.sh'), 'utf8')).toContain('LICENSE');
     expect(fs.readFileSync(path.join(stage, 'LICENSE'), 'utf8')).toBe(fs.readFileSync(path.join(root, 'LICENSE'), 'utf8'));
     expect(JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).name).toBe('@colbymchenry/codegraph');
+    const readme = fs.readFileSync(path.join(stage, 'README.md'), 'utf8');
+    for (const heading of ['## CLI Reference', '## MCP Tools', '## Library Usage', '## Configuration']) {
+      expect(readme).toContain(heading);
+    }
+    expect(readme).toContain('npx @partme.ai/codegraph');
+    expect(readme).not.toContain('npx @colbymchenry/codegraph');
+    expect(readme).not.toContain('SLSA v1.0 Build Level 2');
+
+    // Exercise the actual archive -> npm-package path, not script literals.
+    const bundle = path.join(stage, 'bundle/codegraph-darwin-arm64');
+    fs.mkdirSync(path.join(bundle, 'lib'), { recursive: true });
+    fs.cpSync(path.join(root, 'dist'), path.join(bundle, 'lib/dist'), { recursive: true });
+    fs.cpSync(path.join(root, 'LICENSE'), path.join(bundle, 'LICENSE'));
+    fs.writeFileSync(path.join(bundle, 'node'), 'fixture runtime');
+    fs.mkdirSync(path.join(stage, 'release'), { recursive: true });
+    fs.mkdirSync(path.join(stage, 'dist'), { recursive: true });
+    fs.writeFileSync(path.join(stage, 'dist/index.d.ts'), 'export {};\n');
+    const archive = spawnSync('tar', ['-czf', path.join(stage, 'release/codegraph-darwin-arm64.tar.gz'), '-C', path.join(stage, 'bundle'), 'codegraph-darwin-arm64'], { encoding: 'utf8' });
+    expect(archive.status, archive.stderr).toBe(0);
+    const assembled = spawnSync('bash', [path.join(stage, 'scripts/pack-npm.sh')], { encoding: 'utf8' });
+    expect(assembled.status, assembled.stderr).toBe(0);
+    for (const name of ['main', 'codegraph-darwin-arm64']) {
+      const cwd = path.join(stage, 'release/npm', name);
+      expect(fs.readFileSync(path.join(cwd, 'README.md'), 'utf8')).toContain('## CLI Reference');
+      const packed = spawnSync('npm', ['pack', '--dry-run', '--json'], { cwd, encoding: 'utf8', shell: process.platform === 'win32' });
+      expect(packed.status, packed.stderr).toBe(0);
+      expect(JSON.parse(packed.stdout)[0].files.some((file: { path: string }) => file.path === 'README.md')).toBe(true);
+    }
   } finally { fs.rmSync(stage, { recursive: true, force: true }); }
 }, 30000);

@@ -63,7 +63,25 @@ replace('scripts/build-bundle.sh', 'cp "$ROOT/package.json" "$ROOT/package-lock.
 replace('scripts/build-bundle.sh', '( cd "$WORK" && zip -rqX "$ARCHIVE" "codegraph-${TARGET}" )',
   '( cd "$WORK" && if command -v zip >/dev/null 2>&1; then zip -rqX "$ARCHIVE" "codegraph-${TARGET}"; else python -m zipfile -c "$ARCHIVE" "codegraph-${TARGET}"; fi )');
 replace('scripts/pack-npm.sh', 'files: [process.env.NODEFILE, "lib", "bin"]', 'files: [process.env.NODEFILE, "lib", "bin", "LICENSE"]');
+replace('scripts/pack-npm.sh', '  targets+=("$target")', '  cp "$ROOT/README.md" "$pkgdir/README.md"\n  targets+=("$target")');
 replace('scripts/pack-npm.sh', 'cp "$ROOT/scripts/npm-shim.js" "$NPM/main/npm-shim.js"', 'cp "$ROOT/LICENSE" "$NPM/main/LICENSE"\ncp "$ROOT/scripts/npm-shim.js" "$NPM/main/npm-shim.js"');
 replace('scripts/pack-npm.sh', '"npm-sdk.js","dist","README.md"', '"npm-sdk.js","dist","README.md","LICENSE"');
-write('README.md', `# @partme.ai/codegraph\n\nZig-enabled fork of [CodeGraph](https://github.com/colbymchenry/codegraph), released by PartMe under the original MIT license.\n\n\`npx @partme.ai/codegraph@${version} --version\`\n\nThe CLI bundles Node and the matching native kernel for macOS, Linux and Windows (x64/arm64). Zig indexing uses the audited WASM grammar.\n\nUse \`npx @partme.ai/codegraph\` to configure your agent, then \`npx @partme.ai/codegraph init\` inside a project. The library entry is \`require('@partme.ai/codegraph')\` (requires a supported host Node with node:sqlite).\n\n[Source and audit](https://github.com/partme-ai/codegraph/tree/v${version}) · [Release](https://github.com/partme-ai/codegraph/releases/tag/v${version})\n\nThis prerelease satisfies the documented static-indexing acceptance contract; it is not a complete Zig compiler or evaluator.\n`);
+// Keep the full upstream usage documentation. Only distribution-specific
+// commands and release claims change; upstream attribution/docs stay intact.
+const releaseUrl = `https://github.com/partme-ai/codegraph/releases/tag/v${version}`;
+const sourceUrl = `https://github.com/partme-ai/codegraph/blob/v${version}/`;
+let readme = read('README.md').replaceAll('@colbymchenry/codegraph', '@partme.ai/codegraph');
+for (const installer of ['install.sh', 'install.ps1']) {
+  readme = readme.replaceAll(`https://raw.githubusercontent.com/colbymchenry/codegraph/main/${installer}`,
+    `https://github.com/partme-ai/codegraph/releases/download/v${version}/${installer}`);
+}
+readme = readme.replaceAll('https://github.com/colbymchenry/codegraph/issues', 'https://github.com/partme-ai/codegraph/issues');
+const verifiedStart = readme.indexOf('## Verified releases\n');
+const verifiedEnd = readme.indexOf('## Supported Platforms\n', verifiedStart);
+if (verifiedStart < 0 || verifiedEnd < 0) throw new Error('README release documentation boundaries changed');
+readme = readme.slice(0, verifiedStart) + `## Verified releases\n\nThis is the PartMe Zig distribution. The [GitHub release](${releaseUrl})\ncontains the platform archives, SHA256SUMS and BUILD.json with the source commit\nand build/validation workflow links. Check each npm package's published metadata\nfor its provenance; upstream signing claims do not automatically apply to this fork.\n\n` + readme.slice(verifiedEnd);
+readme = readme.replace(/^\[!\[(?:npm provenance|Attested builds)\].*\n/gm, '');
+// npm renders package-root Markdown; relative repository links must still work.
+readme = readme.replace(/\]\((?!https?:|#)([^)]+)\)/g, (_, link) => `](${sourceUrl}${link})`);
+write('README.md', `# @partme.ai/codegraph\n\nZig-enabled fork of [CodeGraph](https://github.com/colbymchenry/codegraph), distributed by PartMe under the original MIT license.\n\nInstall with \`npx @partme.ai/codegraph\`. npm automatically selects the matching platform package; users do not need to install a platform package directly.\n\nThis README retains the upstream usage guide below, with PartMe installation commands. Upstream documentation links describe shared features. Zig support follows the [static-indexing acceptance contract](${sourceUrl}docs/zig-production-audit.md).\n\n---\n\n` + readme);
 console.log(`Staged ${pkg.name}@${version} in ${root}`);
