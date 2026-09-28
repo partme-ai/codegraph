@@ -53,3 +53,18 @@ staging regression test checks the generated npm package's file list. Do not
 replace existing npm versions to retrofit documentation. Recovery of
 `1.6.0-zig` deliberately loads its original staging transform from the verified
 build commit, preserving its published package integrity and release manifest.
+
+Publication completed on 2026-09-28 UTC:
+
+- [Public GitHub prerelease](https://github.com/partme-ai/codegraph/releases/tag/v1.6.0-zig)
+  contains all six platform archives and their SHA256 checksums.
+- [Successful publish-only Actions run](https://github.com/partme-ai/codegraph/actions/runs/36459488440)
+  reused build `36454692736`; the native bundle job was skipped. All seven npm
+  versions and tarball integrity values were verified, with `latest` selecting
+  `1.6.0-zig`. Its fresh-cache, unversioned npm execution passed on Linux x64.
+- A separate fresh-cache public npm installation on macOS arm64 selected only
+  the main package and `codegraph-darwin-arm64`. CLI version and SDK loading
+  passed, as did Zig grammar/notice checks, alias calls, incremental rebinding,
+  database reopening, and forced-worker resolution.
+- The original `BUILD.json` retains the first asset-upload attempt. The Actions
+  run linked above is the successful completion record for npm publication.
