@@ -358,8 +358,8 @@ has push, pull-request and manual triggers and remains a required dependency
 of the existing release workflow. Running validation does not publish a release.
 
 Local and remote evidence must remain distinct: adding the matrix is not proof
-it ran. Windows/x64 platforms and remote workflow results remain pending until
-the reviewed changes are pushed and the matrix completes successfully.
+it ran. The local-only snapshot below is historical; the completed remote matrix
+is recorded in the subsequent remote acceptance section.
 
 
 ### 2026-09-29 local gate evidence
@@ -390,9 +390,54 @@ the reviewed changes are pushed and the matrix completes successfully.
 | Windows arm64 | Remote run pending | Remote run pending |
 
 
-Remote execution is a separate pending action. Before pushing, the existing
-`feat/zig-supported` branch was checked: the working HEAD is
+At the end of the local-only pass, remote execution was still pending. Before
+pushing, the existing `feat/zig-supported` branch was checked: the working HEAD was
 `40f112453583a2304c4b605a3a9d6545919662bd`, and it is 627 commits ahead of the
 remote branch, with no remote-only commits. Publishing the local changes on
 that branch would also upload those existing commits. No commit, push, tag or
 release was performed during this local acceptance pass.
+
+### 2026-09-29 remote acceptance after main merge
+
+The user authorized committing and pushing all changes. Local `main` was
+fast-forwarded to `003305f1e7edbb2f3b966f1631585aab02cef7bf`; merge
+`3c78c1d76dbaeacf1c8fab925a24975589cc0fab` incorporates it into
+`feat/zig-supported`. No conflict or history rewrite was required.
+
+[Zig validation run 36452441903](https://github.com/partme-ai/codegraph/actions/runs/36452441903)
+completed successfully on tested commit
+`11a5422ba6f52597b99ced20dae8f793fccdf672`: all 13 jobs passed.
+The 12 downloaded runtime reports each contain **125 passed, zero failed and
+zero skipped tests**. Every platform also passed normal and forced-worker
+checks against its separately packed production artifact.
+
+The Linux x64 compiler job passed all **125 compiler-backed graph tests**,
+strict Ast comparison on **36 files** (34 accepted by both, two rejected by
+both, zero disagreements), and the three explicitly separate recovery cases.
+The complete cross-language suite passed **5,285 tests**, with **274 skipped**
+and **zero failures** (299 passing / 17 skipped files). The required Zig suites
+have no skips. After merging main, the local build and 150 targeted tests also
+passed, including main's 25 new source-completeness tests.
+
+| Native platform | Node 22 | Node 24 |
+| --- | --- | --- |
+| Linux arm64 | Remote pass | Remote pass |
+| macOS arm64 | Remote pass | Remote pass |
+| Linux x64 | Remote pass | Remote pass |
+| macOS x64 | Remote pass | Remote pass |
+| Windows x64 | Remote pass | Remote pass |
+| Windows arm64 | Remote pass | Remote pass |
+
+Remote execution exposed two CI portability issues, now fixed: Git Bash paths
+must be normalized before tar extracts a Windows archive, and the three-cycle
+incremental/clean-index parity test needs a 30-second integration-test timeout
+on Windows ARM instead of Vitest's default five seconds. All graph assertions
+and the zero-skip gate remain intact; no tests were removed or retried into a
+passing report.
+
+The declared acceptance contract is now satisfied, including the native
+platform matrix and compiler/full-regression gate. This is release-readiness
+evidence for the bounded static-indexing contract, not proof of all possible
+Zig semantics or strict syntax parity on malformed programs. The three named
+recovery differences remain documented. No tag, npm publication or release
+workflow was triggered.
