@@ -77,6 +77,9 @@ assets/generate-waitlist.py
 # Local scratch tests (never commit)
 __tests__/zz-scratch*
 
+# Local run artifacts (lint logs, ad-hoc probe scripts)
+out/
+
 # linux-arm64 kernel cross-build cache (rust:1-bookworm builder)
 target-linux/
 .kommandr/kommandr.db

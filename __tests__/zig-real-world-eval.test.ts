@@ -3,9 +3,24 @@ import { extractFromSource, initGrammars, loadGrammarsForLanguages } from '../sr
 import * as fs from 'fs';
 import * as path from 'path';
 
-const PROJECT_ROOT = '/Users/wandl/workspaces/workspace-octoclaw-labs/agentscope-zig';
-const MIDDLEWARE_FILE = path.join(PROJECT_ROOT,
-  'agentscope-harness/src/main/zig/io/agentscope/harness/agent/middleware/DynamicSubagentsMiddleware.zig');
+/**
+ * Real-world Zig extraction evaluation, driven by environment variables so it
+ * runs against any local Zig checkout and never encodes a machine-specific path:
+ *
+ *   ZIG_E2E_ROOT      (required) absolute path to a real Zig project; the whole
+ *                     suite skips when unset or nonexistent.
+ *   ZIG_E2E_FILE      (optional) path — relative to ZIG_E2E_ROOT — of one .zig
+ *                     file to deep-assert (struct with fields + methods + type
+ *                     refs + calls); skipped when unset or missing.
+ *
+ * Example:
+ *   ZIG_E2E_ROOT=/path/to/some-zig-project npx vitest run __tests__/zig-real-world-eval.test.ts
+ */
+const PROJECT_ROOT = process.env.ZIG_E2E_ROOT ?? '';
+const DEEP_FILE_REL = process.env.ZIG_E2E_FILE ?? '';
+const rootAvailable = PROJECT_ROOT !== '' && fs.existsSync(PROJECT_ROOT);
+const DEEP_FILE = DEEP_FILE_REL ? path.join(PROJECT_ROOT, DEEP_FILE_REL) : '';
+const deepFileAvailable = rootAvailable && DEEP_FILE !== '' && fs.existsSync(DEEP_FILE);
 
 function walkZigFiles(dir: string): string[] {
   const result: string[] = [];
@@ -20,15 +35,16 @@ function walkZigFiles(dir: string): string[] {
 }
 
 beforeAll(async () => {
+  if (!rootAvailable) return;
   await initGrammars();
   await loadGrammarsForLanguages(['zig']);
 });
 
-describe('Zig Real-World Extraction: agentscope-zig', () => {
+describe.skipIf(!rootAvailable)(`Zig Real-World Extraction: ${path.basename(PROJECT_ROOT) || 'ZIG_E2E_ROOT'}`, () => {
   const zigFiles = walkZigFiles(PROJECT_ROOT);
 
   it('should parse all .zig files without errors', () => {
-    expect(zigFiles.length).toBeGreaterThan(100);
+    expect(zigFiles.length).toBeGreaterThan(0);
     const errors: string[] = [];
     for (const filePath of zigFiles) {
       try {
@@ -81,9 +97,9 @@ describe('Zig Real-World Extraction: agentscope-zig', () => {
     expect(totalTypeRefs).toBeGreaterThan(10);
   });
 
-  it('should extract methods and fields from a real implementation file', () => {
-    const code = fs.readFileSync(MIDDLEWARE_FILE, 'utf8');
-    const result = extractFromSource(MIDDLEWARE_FILE, code);
+  it.skipIf(!deepFileAvailable)('should extract methods and fields from a real implementation file', () => {
+    const code = fs.readFileSync(DEEP_FILE, 'utf8');
+    const result = extractFromSource(DEEP_FILE, code);
     const methods = result.nodes.filter(n => n.kind === 'method');
     const fields = result.nodes.filter(n => n.kind === 'field');
     const structs = result.nodes.filter(n => n.kind === 'struct');
@@ -91,25 +107,12 @@ describe('Zig Real-World Extraction: agentscope-zig', () => {
     const calls = result.unresolvedReferences.filter(r => r.referenceKind === 'calls');
     const imports = result.unresolvedReferences.filter(r => r.referenceKind === 'imports');
 
-    // DynamicSubagentsMiddleware is a struct with fields and methods
     expect(structs.length).toBeGreaterThanOrEqual(1);
-    expect(fields.length).toBeGreaterThanOrEqual(5); // static_entries, main_workspace_path, etc.
-    expect(methods.length).toBeGreaterThanOrEqual(3); // init, getTools, onAgent, onReasoning, onModelCall
-    expect(imports.length).toBeGreaterThanOrEqual(2); // std, Msg, MsgRole, SubagentEntry
+    expect(fields.length).toBeGreaterThanOrEqual(5);
+    expect(methods.length).toBeGreaterThanOrEqual(3);
+    expect(imports.length).toBeGreaterThanOrEqual(2);
     expect(calls.length).toBeGreaterThanOrEqual(1);
-    expect(typeRefs.length).toBeGreaterThanOrEqual(1); // SubagentEntry type on fields
-
-    // Verify specific methods exist
-    const methodNames = methods.map(m => m.name);
-    expect(methodNames).toContain('init');
-    expect(methodNames).toContain('getTools');
-    expect(methodNames).toContain('onAgent');
-    expect(methodNames).toContain('onReasoning');
-
-    // Verify specific fields exist
-    const fieldNames = fields.map(f => f.name);
-    expect(fieldNames).toContain('static_entries');
-    expect(fieldNames).toContain('allocator');
+    expect(typeRefs.length).toBeGreaterThanOrEqual(1);
   });
 
   it('extraction stats summary', () => {
@@ -124,7 +127,7 @@ describe('Zig Real-World Extraction: agentscope-zig', () => {
       for (const n of result.nodes) stats.nodeKinds[n.kind] = (stats.nodeKinds[n.kind] || 0) + 1;
       for (const r of result.unresolvedReferences) stats.refKinds[r.referenceKind] = (stats.refKinds[r.referenceKind] || 0) + 1;
     }
-    console.log(`\n=== agentscope-zig Extraction Stats ===`);
+    console.log(`\n=== ${path.basename(PROJECT_ROOT)} Zig Extraction Stats ===`);
     console.log(`Files: ${stats.files}`);
     console.log(`Nodes: ${stats.nodes}, Edges: ${stats.edges}, Refs: ${stats.refs}`);
     console.log(`Node kinds:`, stats.nodeKinds);
