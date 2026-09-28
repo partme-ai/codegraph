@@ -58,6 +58,10 @@ replace('scripts/npm-shim.js', 'https://raw.githubusercontent.com/', 'https://gi
 // Preserve the upstream MIT notice in every published package/archive.
 replace('scripts/build-bundle.sh', 'cp "$ROOT/package.json" "$ROOT/package-lock.json" "$STAGE/lib/"',
   'cp "$ROOT/package.json" "$ROOT/package-lock.json" "$STAGE/lib/"\ncp "$ROOT/LICENSE" "$STAGE/LICENSE"\ncp "$ROOT/LICENSE" "$STAGE/lib/LICENSE"');
+// Windows hosted runners have Python but no Info-ZIP executable. Python's
+// recursive zip writer retains the full tree, including dotfiles.
+replace('scripts/build-bundle.sh', '( cd "$WORK" && zip -rqX "$ARCHIVE" "codegraph-${TARGET}" )',
+  '( cd "$WORK" && if command -v zip >/dev/null 2>&1; then zip -rqX "$ARCHIVE" "codegraph-${TARGET}"; else python -m zipfile -c "$ARCHIVE" "codegraph-${TARGET}"; fi )');
 replace('scripts/pack-npm.sh', 'files: [process.env.NODEFILE, "lib", "bin"]', 'files: [process.env.NODEFILE, "lib", "bin", "LICENSE"]');
 replace('scripts/pack-npm.sh', 'cp "$ROOT/scripts/npm-shim.js" "$NPM/main/npm-shim.js"', 'cp "$ROOT/LICENSE" "$NPM/main/LICENSE"\ncp "$ROOT/scripts/npm-shim.js" "$NPM/main/npm-shim.js"');
 replace('scripts/pack-npm.sh', '"npm-sdk.js","dist","README.md"', '"npm-sdk.js","dist","README.md","LICENSE"');
