@@ -34,11 +34,11 @@ jobs:
           cmp "$RUNNER_TEMP/tree-sitter-zig.wasm" src/extraction/wasm/tree-sitter-zig.wasm
       - name: Zig graph and worker contracts
         run: |
-          npx vitest run __tests__/zig-extraction.test.ts __tests__/zig-production.test.ts __tests__/zig-static-semantics.test.ts __tests__/zig-instance-fields.test.ts __tests__/zig-acceptance.test.ts --maxWorkers=2 --minWorkers=1 --reporter=default --reporter=json --outputFile=zig-tests.json
+          npx vitest run __tests__/zig-extraction.test.ts __tests__/zig-production.test.ts __tests__/zig-static-semantics.test.ts __tests__/zig-instance-fields.test.ts __tests__/zig-acceptance.test.ts --maxWorkers=2 --reporter=default --reporter=json --outputFile=zig-tests.json
           node scripts/check-zig-test-report.mjs zig-tests.json
-          npx vitest run __tests__/worker-teardown.test.ts --maxWorkers=2 --minWorkers=1
+          npx vitest run __tests__/worker-teardown.test.ts --maxWorkers=2
       - name: MCP daemon contracts
-        run: npx vitest run __tests__/mcp-daemon.test.ts --maxWorkers=2 --minWorkers=1
+        run: npx vitest run __tests__/mcp-daemon.test.ts --maxWorkers=2
       - name: Compiler-backed Zig syntax parity
         run: |
           curl --fail --silent --show-error --location https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz -o "$RUNNER_TEMP/zig.tar.xz"
@@ -52,4 +52,4 @@ jobs:
           CODEGRAPH_PARALLEL_RESOLVE_MIN=0 node scripts/check-zig-package.mjs .
           npm pack --dry-run
       - name: Cross-language regression
-        run: npx vitest run --maxWorkers=2 --minWorkers=1
+        run: npx vitest run --maxWorkers=2
