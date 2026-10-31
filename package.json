@@ -1,10 +1,10 @@
 {
-  "name": "@colbymchenry/codegraph",
-  "version": "1.6.2",
-  "description": "Supercharge AI coding agents with semantic code intelligence — surgical context, fewer tool calls, faster answers. 100% local.",
+  "name": "@partme.ai/codegraph",
+  "version": "1.6.2-zig",
+  "description": "Supercharge AI coding agents with semantic code intelligence \u2014 surgical context, fewer tool calls, faster answers. 100% local.",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/colbymchenry/codegraph.git"
+    "url": "git+https://github.com/partme-ai/codegraph.git"
   },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

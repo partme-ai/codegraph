@@ -92,6 +92,8 @@ cp -R "$ROOT/dist" "$STAGE/lib/dist"
 # a 404 — the copy is verified, not assumed.
 node "$ROOT/scripts/check-ui-build.mjs" --root "$STAGE/lib"
 cp "$ROOT/package.json" "$ROOT/package-lock.json" "$STAGE/lib/"
+cp "$ROOT/LICENSE" "$STAGE/LICENSE"
+cp "$ROOT/LICENSE" "$STAGE/lib/LICENSE"
 echo "[bundle] installing production dependencies"
 # The staged package.json declares the `ui` workspace but the bundle carries
 # no ui/ source — only its build output. That is fine: ui/ has dev
@@ -178,7 +180,7 @@ mkdir -p "$OUT"
 if [ "$OSFAM" = "win32" ]; then
   ARCHIVE="$OUT/codegraph-${TARGET}.zip"
   rm -f "$ARCHIVE"
-  ( cd "$WORK" && zip -rqX "$ARCHIVE" "codegraph-${TARGET}" )
+  ( cd "$WORK" && if command -v zip >/dev/null 2>&1; then zip -rqX "$ARCHIVE" "codegraph-${TARGET}"; else python -m zipfile -c "$ARCHIVE" "codegraph-${TARGET}"; fi )
 else
   ARCHIVE="$OUT/codegraph-${TARGET}.tar.gz"
   # --no-xattrs: don't embed macOS xattrs that make GNU tar warn on Linux.

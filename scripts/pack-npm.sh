@@ -5,7 +5,7 @@
 # Produces, under release/npm/:
 #   codegraph-<target>/   one per built bundle — the vendored Node + app, tagged
 #                         with os/cpu so npm installs only the matching one.
-#   main/                 the @colbymchenry/codegraph shim package: a tiny bin
+#   main/                 the @partme.ai/codegraph shim package: a tiny bin
 #                         that execs the matching platform bundle, with every
 #                         platform package in optionalDependencies.
 #
@@ -19,7 +19,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VERSION="${1:-$(node -p "require('$ROOT/package.json').version")}"
-SCOPE="@colbymchenry"
+SCOPE="@partme.ai"
 REL="$ROOT/release"
 NPM="$REL/npm"
 
@@ -67,11 +67,11 @@ for archive in "${archives[@]}"; do
         version: process.env.VERSION,
         description: `CodeGraph self-contained bundle for ${process.env.TARGET}`,
         os: [process.env.OSV], cpu: [process.env.ARCHV],
-        files: [process.env.NODEFILE, "lib", "bin"],
+        files: [process.env.NODEFILE, "lib", "bin", "LICENSE"],
         license: "MIT",
         // npm --provenance refuses to publish unless this matches the repo
         // the release workflow runs in.
-        repository: { type: "git", url: "git+https://github.com/colbymchenry/codegraph.git" }
+        repository: { type: "git", url: "git+https://github.com/partme-ai/codegraph.git" }
       }, null, 2) + "\n");
     ' "$pkgdir/package.json"
   targets+=("$target")
@@ -84,6 +84,7 @@ done
 #                platform bundle's compiled library — the `main`.
 #   dist/        the .d.ts tree only (types). The runtime .js stays in the
 #                per-platform bundle so its deps aren't duplicated here.
+cp "$ROOT/LICENSE" "$NPM/main/LICENSE"
 cp "$ROOT/scripts/npm-shim.js" "$NPM/main/npm-shim.js"
 cp "$ROOT/scripts/npm-sdk.js" "$NPM/main/npm-sdk.js"
 [ -f "$ROOT/README.md" ] && cp "$ROOT/README.md" "$NPM/main/README.md"
@@ -117,9 +118,9 @@ VERSION="$VERSION" SCOPE="$SCOPE" TARGETS="${targets[*]}" \
         "./package.json": "./package.json"
       },
       optionalDependencies: opt,
-      files: ["npm-shim.js","npm-sdk.js","dist","README.md"],
+      files: ["npm-shim.js","npm-sdk.js","dist","README.md","LICENSE"],
       license: "MIT",
-      repository: { type: "git", url: "git+https://github.com/colbymchenry/codegraph.git" }
+      repository: { type: "git", url: "git+https://github.com/partme-ai/codegraph.git" }
     }, null, 2) + "\n");
   ' "$NPM/main/package.json"
 
@@ -127,7 +128,7 @@ echo "[pack-npm] ${SCOPE}/codegraph@${VERSION} (${#targets[@]} platform packages
 echo "[pack-npm] output: $NPM"
 
 # ---------------------------------------------------------------------------
-# @colbymchenry/codegraph-ui — the viewer's components as a Svelte library.
+# @partme.ai/codegraph-ui — the viewer's components as a Svelte library.
 #
 # Staged into release/npm-ui/, NOT release/npm/: the workflow publishes
 # `release/npm/codegraph-*` by glob, and a directory named codegraph-ui in

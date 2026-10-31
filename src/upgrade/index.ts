@@ -8,7 +8,7 @@
  *     canonical installer script (single source of truth) so the download /
  *     version-resolution / PATH logic never drifts between first-install and
  *     upgrade.
- *   - **npm** — installed via `npm i -g @colbymchenry/codegraph`, or into a
+ *   - **npm** — installed via `npm i -g @partme.ai/codegraph`, or into a
  *     project. Upgrading shells out to npm (for a project, in that project).
  *     A pnpm, yarn or bun install is named, with that manager's command.
  *   - **npx** — ephemeral; nothing to upgrade (next `npx` fetches latest).
@@ -32,9 +32,9 @@ import * as https from 'https';
 import { spawnSync } from 'child_process';
 import { ansiColorsEnabled } from '../ui/color';
 
-export const REPO = 'colbymchenry/codegraph';
-export const NPM_PACKAGE = '@colbymchenry/codegraph';
-const RAW_BASE = `https://raw.githubusercontent.com/${REPO}/main`;
+export const REPO = 'partme-ai/codegraph';
+export const NPM_PACKAGE = '@partme.ai/codegraph';
+const RAW_BASE = `https://github.com/${REPO}/releases/download/v1.6.2-zig`;
 export const INSTALL_SH_URL = `${RAW_BASE}/install.sh`;
 export const INSTALL_PS1_URL = `${RAW_BASE}/install.ps1`;
 
@@ -117,7 +117,7 @@ export function detectInstallMethod(input: DetectInput): InstallMethod {
   const norm = toPosix(input.filename);
 
   // Path-based checks come FIRST. The npm thin-installer's per-platform
-  // package (@colbymchenry/codegraph-<platform>-<arch>) is itself a complete
+  // package (@partme.ai/codegraph-<platform>-<arch>) is itself a complete
   // bundle — vendored node + bin/ launcher — living inside node_modules, so
   // the layout sniff below would misread every npm install as a standalone
   // bundle. `upgrade` would then curl install.sh into ~/.codegraph: a SECOND
@@ -126,7 +126,7 @@ export function detectInstallMethod(input: DetectInput): InstallMethod {
   // self-inflicted). A path under node_modules is authoritative about HOW the
   // user installed, whatever the artifact inside looks like.
 
-  // npx cache: <…>/_npx/<hash>/node_modules/@colbymchenry/codegraph/…
+  // npx cache: <…>/_npx/<hash>/node_modules/@partme.ai/codegraph/…
   // (checked before npm — the npx cache path also contains /node_modules/).
   if (norm.includes('/_npx/')) {
     return { kind: 'npx' };
@@ -748,7 +748,7 @@ export const WINDOWS_SWAP_FUNCTION = String.raw`function Install-CodeGraphFiles(
     $lost = Undo-Logged
     $msg = "Could not replace $at ($($x.Message))."
     if ($lost) {
-      $msg += " $lost file(s) could not be put back, so the install may not start. Close your agent sessions and any running codegraph commands, then reinstall: irm https://raw.githubusercontent.com/colbymchenry/codegraph/main/install.ps1 | iex"
+      $msg += " $lost file(s) could not be put back, so the install may not start. Close your agent sessions and any running codegraph commands, then reinstall: irm https://raw.githubusercontent.com/partme-ai/codegraph/main/install.ps1 | iex"
     } else {
       $msg += " Nothing was changed: the existing install still works. If another program has CodeGraph's files open, close your agent sessions (they run the CodeGraph MCP server) and any running codegraph commands, then try again."
     }

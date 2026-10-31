@@ -72,7 +72,7 @@ describe('detectInstallMethod', () => {
   });
 
   it('detects a global npm install', () => {
-    const filename = '/usr/local/lib/node_modules/@colbymchenry/codegraph/dist/bin/codegraph.js';
+    const filename = '/usr/local/lib/node_modules/@partme.ai/codegraph/dist/bin/codegraph.js';
     const m = detectInstallMethod({
       filename,
       platform: 'linux',
@@ -84,13 +84,13 @@ describe('detectInstallMethod', () => {
 
   it('detects a local (project) npm install as local', () => {
     const cwd = '/home/u/project';
-    const filename = `${cwd}/node_modules/@colbymchenry/codegraph/dist/bin/codegraph.js`;
+    const filename = `${cwd}/node_modules/@partme.ai/codegraph/dist/bin/codegraph.js`;
     const m = detectInstallMethod({ filename, platform: 'linux', cwd, exists: bundleExists(new Set([`${cwd}/package.json`])) });
     expect(m).toEqual({ kind: 'npm', scope: 'local', root: cwd });
   });
 
   it('detects an npx run from the _npx cache', () => {
-    const filename = '/home/u/.npm/_npx/abc123/node_modules/@colbymchenry/codegraph/dist/bin/codegraph.js';
+    const filename = '/home/u/.npm/_npx/abc123/node_modules/@partme.ai/codegraph/dist/bin/codegraph.js';
     const m = detectInstallMethod({ filename, platform: 'linux', cwd: '/home/u', exists: () => false });
     expect(m).toEqual({ kind: 'npx' });
   });
@@ -101,7 +101,7 @@ describe('detectInstallMethod', () => {
   // install.sh into ~/.codegraph — a second install that loses the PATH race
   // to npm's shim, so `codegraph -v` stays on the old version forever.
   it('detects the npm thin-installer platform package as npm, not bundle', () => {
-    const root = '/usr/local/lib/node_modules/@colbymchenry/codegraph/node_modules/@colbymchenry/codegraph-linux-x64';
+    const root = '/usr/local/lib/node_modules/@partme.ai/codegraph/node_modules/@partme.ai/codegraph-linux-x64';
     const filename = `${root}/lib/dist/bin/codegraph.js`;
     const present = new Set([`${root}/node`, `${root}/bin/codegraph`]);
     const m = detectInstallMethod({
@@ -115,7 +115,7 @@ describe('detectInstallMethod', () => {
 
   it('detects a project-local thin-installer platform package as npm local', () => {
     const cwd = '/home/u/project';
-    const root = `${cwd}/node_modules/@colbymchenry/codegraph/node_modules/@colbymchenry/codegraph-darwin-arm64`;
+    const root = `${cwd}/node_modules/@partme.ai/codegraph/node_modules/@partme.ai/codegraph-darwin-arm64`;
     const filename = `${root}/lib/dist/bin/codegraph.js`;
     const present = new Set([`${root}/node`, `${root}/bin/codegraph`, `${cwd}/node_modules/.bin/codegraph`]);
     const m = detectInstallMethod({ filename, platform: 'darwin', cwd, exists: bundleExists(present) });
@@ -123,7 +123,7 @@ describe('detectInstallMethod', () => {
   });
 
   it('still detects an npx run when the cached platform package has the bundle layout', () => {
-    const root = '/home/u/.npm/_npx/abc123/node_modules/@colbymchenry/codegraph/node_modules/@colbymchenry/codegraph-linux-x64';
+    const root = '/home/u/.npm/_npx/abc123/node_modules/@partme.ai/codegraph/node_modules/@partme.ai/codegraph-linux-x64';
     const filename = `${root}/lib/dist/bin/codegraph.js`;
     const present = new Set([`${root}/node`, `${root}/bin/codegraph`]);
     const m = detectInstallMethod({ filename, platform: 'linux', cwd: '/home/u', exists: bundleExists(present) });
@@ -162,18 +162,18 @@ describe('detectInstallMethod', () => {
     const slash = (p: string | undefined) => p?.replace(/\\/g, '/');
     const winHome = 'C:/Users/X';
     const winPrefix = `${winHome}/AppData/Roaming/npm`;
-    const winThin = `${winPrefix}/node_modules/@colbymchenry/codegraph/node_modules/@colbymchenry/codegraph-win32-x64/lib/dist/bin/codegraph.js`;
+    const winThin = `${winPrefix}/node_modules/@partme.ai/codegraph/node_modules/@partme.ai/codegraph-win32-x64/lib/dist/bin/codegraph.js`;
 
     it.each([winHome, 'C:/Users', 'C:/', 'C:/Users/X/projects/app'])('a Windows global install under %%APPDATA%%\\npm is global with cwd %s', (cwd) => {
       const present = new Set([`${winPrefix}/codegraph.cmd`, `${winHome}/package.json`]);
-      for (const filename of [winThin, `${winPrefix}/node_modules/@colbymchenry/codegraph/dist/bin/codegraph.js`]) {
+      for (const filename of [winThin, `${winPrefix}/node_modules/@partme.ai/codegraph/dist/bin/codegraph.js`]) {
         expect(detectInstallMethod({ filename, platform: 'win32', cwd, exists: bundleExists(present) })).toEqual({ kind: 'npm', scope: 'global' });
       }
     });
 
     it.each(['/home/u', '/', '/home'])('a POSIX global install under nvm in the home folder is global with cwd %s', (cwd) => {
       const prefix = '/home/u/.nvm/versions/node/v22.11.0';
-      const filename = `${prefix}/lib/node_modules/@colbymchenry/codegraph/dist/bin/codegraph.js`;
+      const filename = `${prefix}/lib/node_modules/@partme.ai/codegraph/dist/bin/codegraph.js`;
       const present = new Set([`${prefix}/bin/codegraph`, '/home/u/package.json']);
       expect(detectInstallMethod({ filename, platform: 'linux', cwd, exists: bundleExists(present) })).toEqual({ kind: 'npm', scope: 'global' });
     });
@@ -181,17 +181,17 @@ describe('detectInstallMethod', () => {
     it('a global install under a custom prefix is global from home (~/.npm-global, D:\\tools\\npm)', () => {
       const posix = '/home/u/.npm-global';
       expect(detectInstallMethod({
-        filename: `${posix}/lib/node_modules/@colbymchenry/codegraph/dist/bin/codegraph.js`,
+        filename: `${posix}/lib/node_modules/@partme.ai/codegraph/dist/bin/codegraph.js`,
         platform: 'darwin', cwd: '/home/u', exists: bundleExists(new Set([`${posix}/bin/codegraph`])),
       })).toEqual({ kind: 'npm', scope: 'global' });
       expect(detectInstallMethod({
-        filename: 'D:/tools/npm/node_modules/@colbymchenry/codegraph/dist/bin/codegraph.js',
+        filename: 'D:/tools/npm/node_modules/@partme.ai/codegraph/dist/bin/codegraph.js',
         platform: 'win32', cwd: 'D:/', exists: bundleExists(new Set(['D:/tools/npm/codegraph.cmd'])),
       })).toEqual({ kind: 'npm', scope: 'global' });
     });
 
     it('a local install whose project root is the home folder stays local and belongs to the home folder, from any cwd', () => {
-      const filename = `${winHome}/node_modules/@colbymchenry/codegraph/dist/bin/codegraph.js`;
+      const filename = `${winHome}/node_modules/@partme.ai/codegraph/dist/bin/codegraph.js`;
       const present = new Set([`${winHome}/package.json`, `${winHome}/node_modules/.bin/codegraph.cmd`, `${winHome}/projects/app/package.json`]);
       // ~/projects/app is a project of its own: npm run there would install into it.
       for (const cwd of [winHome, 'C:/', `${winHome}/projects/app`]) {
@@ -202,7 +202,7 @@ describe('detectInstallMethod', () => {
 
     it('a local install in a project belongs to that project, from any cwd', () => {
       const project = '/home/u/projects/app';
-      const filename = `${project}/node_modules/@colbymchenry/codegraph/dist/bin/codegraph.js`;
+      const filename = `${project}/node_modules/@partme.ai/codegraph/dist/bin/codegraph.js`;
       const present = new Set([`${project}/package.json`, `${project}/node_modules/.bin/codegraph`]);
       for (const cwd of [project, `${project}/src`, `${project}/packages/web`, '/home/u', '/', '/home/u/projects/application']) {
         expect(detectInstallMethod({ filename, platform: 'linux', cwd, exists: bundleExists(present) })).toEqual({ kind: 'npm', scope: 'local', root: project });
@@ -211,7 +211,7 @@ describe('detectInstallMethod', () => {
 
     it('npx and bundled installs under the home folder are unaffected by a home cwd', () => {
       expect(detectInstallMethod({
-        filename: `${winHome}/AppData/Local/npm-cache/_npx/1a2b3c/node_modules/@colbymchenry/codegraph/dist/bin/codegraph.js`,
+        filename: `${winHome}/AppData/Local/npm-cache/_npx/1a2b3c/node_modules/@partme.ai/codegraph/dist/bin/codegraph.js`,
         platform: 'win32', cwd: winHome, exists: () => false,
       })).toEqual({ kind: 'npx' });
       const winBundle = `${winHome}/AppData/Local/codegraph/current`;
@@ -230,17 +230,17 @@ describe('detectInstallMethod', () => {
     it('a pnpm, yarn or bun install is named as such, so npm never runs in its folder', () => {
       const pnpm = '/home/u/.local/share/pnpm/global/5';
       expect(detectInstallMethod({
-        filename: `${pnpm}/node_modules/.pnpm/@colbymchenry+codegraph@1.6.2/node_modules/@colbymchenry/codegraph/dist/bin/codegraph.js`,
+        filename: `${pnpm}/node_modules/.pnpm/@partme.ai+codegraph@1.6.2/node_modules/@partme.ai/codegraph/dist/bin/codegraph.js`,
         platform: 'linux', cwd: '/home/u', exists: bundleExists(new Set([`${pnpm}/package.json`])),
       })).toEqual({ kind: 'package-manager', manager: 'pnpm', global: true });
       const yarn = '/home/u/.config/yarn/global';
       expect(detectInstallMethod({
-        filename: `${yarn}/node_modules/@colbymchenry/codegraph/dist/bin/codegraph.js`,
+        filename: `${yarn}/node_modules/@partme.ai/codegraph/dist/bin/codegraph.js`,
         platform: 'linux', cwd: '/home/u', exists: bundleExists(new Set([`${yarn}/package.json`, `${yarn}/yarn.lock`])),
       })).toEqual({ kind: 'package-manager', manager: 'yarn', global: true });
       const project = '/home/u/app';
       expect(detectInstallMethod({
-        filename: `${project}/node_modules/@colbymchenry/codegraph/dist/bin/codegraph.js`,
+        filename: `${project}/node_modules/@partme.ai/codegraph/dist/bin/codegraph.js`,
         platform: 'linux', cwd: project, exists: bundleExists(new Set([`${project}/package.json`, `${project}/bun.lock`])),
       })).toEqual({ kind: 'package-manager', manager: 'bun', global: false });
     });
@@ -296,7 +296,7 @@ describe('version helpers', () => {
   });
 
   it('parseLatestTagFromLocation extracts the tag from a releases redirect', () => {
-    expect(parseLatestTagFromLocation('https://github.com/colbymchenry/codegraph/releases/tag/v0.9.9')).toBe('v0.9.9');
+    expect(parseLatestTagFromLocation('https://github.com/partme-ai/codegraph/releases/tag/v0.9.9')).toBe('v0.9.9');
     expect(parseLatestTagFromLocation('https://github.com/o/r/releases/tag/v1.2.3?foo=bar')).toBe('v1.2.3');
     expect(parseLatestTagFromLocation(undefined)).toBeNull();
     expect(parseLatestTagFromLocation('https://github.com/o/r/releases')).toBeNull();
@@ -670,7 +670,7 @@ describe('runUpgrade picks npm\'s scope and folder from the install, not from cw
     const home = 'C:/Users/X';
     const prefix = `${home}/AppData/Roaming/npm`;
     const method = detectInstallMethod({
-      filename: `${prefix}/node_modules/@colbymchenry/codegraph/dist/bin/codegraph.js`,
+      filename: `${prefix}/node_modules/@partme.ai/codegraph/dist/bin/codegraph.js`,
       platform: 'win32',
       cwd: home,
       exists: (p) => p.replace(/\\/g, '/') === `${prefix}/codegraph.cmd`,
@@ -684,7 +684,7 @@ describe('runUpgrade picks npm\'s scope and folder from the install, not from cw
 
   it('a local install is upgraded in its own project, and the version npm left there is checked', async () => {
     const project = path.join(tmp, 'app');
-    const manifest = path.join(project, 'node_modules', '@colbymchenry', 'codegraph', 'package.json');
+    const manifest = path.join(project, 'node_modules', '@partme.ai', 'codegraph', 'package.json');
     fs.mkdirSync(path.dirname(manifest), { recursive: true });
     fs.writeFileSync(path.join(project, 'package.json'), '{}\n');
 
@@ -712,7 +712,7 @@ describe('runUpgrade picks npm\'s scope and folder from the install, not from cw
     fs.writeFileSync(path.join(home, 'node_modules', '.bin', 'codegraph'), '');
     fs.writeFileSync(path.join(other, 'package.json'), '{}\n');
     const method = detectInstallMethod({
-      filename: path.join(home, 'node_modules', '@colbymchenry', 'codegraph', 'dist', 'bin', 'codegraph.js'),
+      filename: path.join(home, 'node_modules', '@partme.ai', 'codegraph', 'dist', 'bin', 'codegraph.js'),
       platform: process.platform,
       cwd: other,
     });

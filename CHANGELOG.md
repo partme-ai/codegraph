@@ -12,6 +12,13 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.6.2-zig] - 2026-10-31
+
+### Added
+
+- Zig indexing in the PartMe fork, based on the current upstream 1.6.2 main; see docs/zig-production-audit.md for supported graph behavior and measured limits.
+
+
 ### Security
 
 - CodeGraph's refusal to use a sensitive folder such as `~/.ssh`, `~/.config`, `/etc` or `C:\Windows` as a project can no longer be sidestepped: a link or junction that leads to one, a differently capitalized name on Windows and macOS, a `\\?\` spelling on Windows, and a path to a missing folder inside one are now refused like the folder itself. Before, any of these let an AI agent's query read the files inside. Thanks @mixxer for finding it.

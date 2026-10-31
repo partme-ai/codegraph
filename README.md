@@ -1,3 +1,9 @@
+# PartMe Zig prerelease v1.6.2-zig
+
+This fork packages Zig indexing for testing under the MIT license. Install the [fork release](https://github.com/partme-ai/codegraph/releases/tag/v1.6.2-zig), or use `npm install` with the attached `partme.ai-codegraph-1.6.2-zig.tgz`. Zig indexing uses the vendored tree-sitter grammar; see [its provenance](docs/grammars/tree-sitter-zig.md) and [validation limits](docs/zig-production-audit.md).
+
+---
+
 <div align="center">
 
 # CodeGraph

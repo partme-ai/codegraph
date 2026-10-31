@@ -1,0 +1,105 @@
+name: PartMe Zig prerelease
+
+on:
+  push:
+    branches: [release/v1.6.2-zig]
+    tags: [v1.6.2-zig]
+
+permissions:
+  contents: read
+
+jobs:
+  bundle:
+    if: github.repository == 'partme-ai/codegraph'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-22.04, target: linux-x64, triple: x86_64-unknown-linux-gnu }
+          - { runner: ubuntu-22.04-arm, target: linux-arm64, triple: aarch64-unknown-linux-gnu }
+          - { runner: macos-15-intel, target: darwin-x64, triple: x86_64-apple-darwin }
+          - { runner: macos-15, target: darwin-arm64, triple: aarch64-apple-darwin }
+          - { runner: windows-2022, target: win32-x64, triple: x86_64-pc-windows-msvc }
+          - { runner: windows-11-arm, target: win32-arm64, triple: aarch64-pc-windows-msvc }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - name: Verify release identity
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            test "$GITHUB_REF_NAME" = "v$(node -p "require('./package.json').version")"
+          fi
+          test "$(node -p "require('./package.json').name")" = '@partme.ai/codegraph'
+      - run: npm ci
+      - name: Build native kernel
+        run: bash scripts/build-kernel.sh --target '${{ matrix.triple }}'
+      - name: Build self-contained bundle
+        run: bash scripts/build-bundle.sh '${{ matrix.target }}'
+      - name: Smoke-test bundle and Zig grammar
+        run: |
+          set -euo pipefail
+          target='${{ matrix.target }}'
+          temp_root="$RUNNER_TEMP"
+          if [[ "$RUNNER_OS" == Windows ]]; then temp_root="$(cygpath -u "$RUNNER_TEMP")"; fi
+          stage="$temp_root/codegraph-$target"
+          mkdir -p "$stage"
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            tar -xf "release/codegraph-$target.zip" -C "$stage"
+            runtime="$stage/codegraph-$target/node.exe"
+          else
+            tar -xzf "release/codegraph-$target.tar.gz" -C "$stage"
+            runtime="$stage/codegraph-$target/node"
+          fi
+          lib="$stage/codegraph-$target/lib"
+          test -f "$stage/codegraph-$target/LICENSE"
+          test -f "$lib/kernel/codegraph-kernel.node"
+          test "$("$runtime" --liftoff-only "$lib/dist/bin/codegraph.js" --version)" = '1.6.2-zig'
+          "$runtime" --liftoff-only scripts/check-zig-package.mjs "$lib"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: codegraph-${{ matrix.target }}
+          path: |
+            release/codegraph-*.tar.gz
+            release/codegraph-*.zip
+          if-no-files-found: error
+          compression-level: 0
+
+  publish:
+    if: github.repository == 'partme-ai/codegraph' && github.ref_type == 'tag'
+    needs: bundle
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: codegraph-*
+          path: release
+          merge-multiple: true
+      - run: npm ci
+      - run: npm run build
+      - name: Pack installable fork package and checksums
+        run: |
+          set -euo pipefail
+          npm pack --pack-destination release
+          test -f release/partme.ai-codegraph-1.6.2-zig.tgz
+          cp install.sh install.ps1 LICENSE release/
+          ( cd release && sha256sum codegraph-*.tar.gz codegraph-*.zip partme.ai-codegraph-1.6.2-zig.tgz install.sh install.ps1 LICENSE > SHA256SUMS )
+          node -e 'const fs=require("fs");fs.writeFileSync("release/BUILD.json",JSON.stringify({repository:process.env.GITHUB_REPOSITORY,tag:process.env.GITHUB_REF_NAME,commit:process.env.GITHUB_SHA,version:"1.6.2-zig",node:"v24.22.1",zigGrammarSha256:"1c3aa3fc4f0f4bb0e22ed61e835afb0295348486f7144fb42422cf22bf9f850b"},null,2)+"\n")'
+      - name: Create fork prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create v1.6.2-zig release/* --repo partme-ai/codegraph --verify-tag --prerelease --title 'CodeGraph Zig v1.6.2-zig' --notes-file docs/zig-release-notes.md

@@ -2,7 +2,7 @@ name: Zig fork validation
 
 on:
   push:
-    branches: [fix/zig-upstream-review-20261031]
+    branches: [fix/zig-upstream-review-20261031, release/v1.6.2-zig]
   workflow_dispatch:
 
 permissions:
