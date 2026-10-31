@@ -48,7 +48,7 @@ type InMessage =
 
 let dbPath: string | null = null;
 
-port.on('message', async (msg: InMessage) => {
+function handleMessage(msg: InMessage): void {
   try {
     switch (msg.type) {
       case 'open': {
@@ -88,10 +88,6 @@ port.on('message', async (msg: InMessage) => {
       case 'resolve': {
         if (!resolver) throw new Error('resolver-worker: resolve before open');
         const tRes = Date.now();
-        if (msg.refs.some(ref => ref.language === 'zig')) {
-          await initGrammars();
-          await loadGrammarsForLanguages(['zig']);
-        }
         const out = resolver.resolveListForAdmission(msg.refs);
         if (process.env.CODEGRAPH_SYNTH_TIMINGS) console.error(`[pool-timing] worker resolve: ${msg.refs.length} refs in ${Date.now() - tRes}ms`);
         port.postMessage({ type: 'result', id: msg.id, ...out });
@@ -145,4 +141,24 @@ port.on('message', async (msg: InMessage) => {
       message: err instanceof Error ? err.message : String(err),
     });
   }
+}
+
+port.on('message', (msg: InMessage) => {
+  if (msg.type !== 'resolve' || !msg.refs.some(ref => ref.language === 'zig')) {
+    handleMessage(msg);
+    return;
+  }
+  // Only Zig resolution needs syntax trees for source-proven alias bindings.
+  void (async () => {
+    try {
+      await initGrammars();
+      await loadGrammarsForLanguages(['zig']);
+      handleMessage(msg);
+    } catch (err) {
+      port.postMessage({
+        type: 'error', id: msg.id,
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+  })();
 });
