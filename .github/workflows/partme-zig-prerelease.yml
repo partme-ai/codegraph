@@ -52,7 +52,11 @@ jobs:
           stage="$temp_root/codegraph-$target"
           mkdir -p "$stage"
           if [[ "$RUNNER_OS" == Windows ]]; then
-            tar -xf "release/codegraph-$target.zip" -C "$stage"
+            if command -v unzip >/dev/null 2>&1; then
+              unzip -q "release/codegraph-$target.zip" -d "$stage"
+            else
+              python -m zipfile -e "release/codegraph-$target.zip" "$stage"
+            fi
             runtime="$stage/codegraph-$target/node.exe"
           else
             tar -xzf "release/codegraph-$target.tar.gz" -C "$stage"
