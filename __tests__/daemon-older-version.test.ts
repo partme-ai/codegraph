@@ -57,7 +57,15 @@ describe('isOlderRelease', () => {
     expect(isOlderRelease('2.0.0', '1.99.99')).toBe(false);
   });
 
-  it('never calls a prerelease, a build or an unknown version older, in either position', () => {
+  it('orders this fork\'s Zig prereleases without replacing a newer stable daemon', () => {
+    expect(isOlderRelease('0.0.1', '1.6.2-zig')).toBe(true);
+    expect(isOlderRelease('1.6.0-zig', '1.6.2-zig')).toBe(true);
+    expect(isOlderRelease('1.6.2-zig', '1.6.2')).toBe(true);
+    expect(isOlderRelease('1.6.2', '1.6.2-zig')).toBe(false);
+    expect(isOlderRelease('1.6.2-zig', '1.6.2-zig')).toBe(false);
+  });
+
+  it('never orders other prereleases, builds or unknown versions', () => {
     for (const odd of ['0.0.0-unknown', '0.0.0-mismatch', '1.6.1-beta.1', '1.6.1+local', 'v1.6.1', 'unknown', 'test', '', '1.6']) {
       expect(isOlderRelease(odd, '1.6.2'), odd).toBe(false);
       expect(isOlderRelease('1.6.1', odd), odd).toBe(false);
@@ -65,7 +73,7 @@ describe('isOlderRelease', () => {
   });
 
   it('lets at most one of two versions replace the other', () => {
-    const versions = ['0.9.0', '1.6.1', '1.6.2', '1.6.10', '1.7.0', '2.0.0', '1.6.2-rc.1', '0.0.0-unknown'];
+    const versions = ['0.9.0', '1.6.1', '1.6.2-zig', '1.6.2', '1.6.10', '1.7.0', '2.0.0', '1.6.2-rc.1', '0.0.0-unknown'];
     for (const a of versions) {
       for (const b of versions) {
         expect(isOlderRelease(a, b) && isOlderRelease(b, a), `${a} / ${b}`).toBe(false);
