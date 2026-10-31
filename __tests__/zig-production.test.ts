@@ -12,6 +12,15 @@ beforeAll(async () => {
 });
 
 describe('Zig production regressions', () => {
+  it('ships a standard tree-sitter module without WASI imports', () => {
+    const wasm = fs.readFileSync(path.join(__dirname, '../src/extraction/wasm/tree-sitter-zig.wasm'));
+    const imports = WebAssembly.Module.imports(new WebAssembly.Module(wasm));
+    expect(imports.map((entry) => entry.module)).toEqual(['env', 'env', 'env', 'env']);
+    expect(imports.map((entry) => entry.name).sort()).toEqual([
+      '__indirect_function_table', '__memory_base', '__table_base', 'memory',
+    ]);
+  });
+
   it.each(['struct', 'enum', 'union', 'opaque'])('parses an empty %s without synthetic missing fields', kind => {
     const tree = getParser('zig')!.parse(`const Empty = ${kind} {};`)!;
     try {

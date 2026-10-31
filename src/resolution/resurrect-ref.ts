@@ -34,5 +34,8 @@ export function resurrectRefFromDroppedEdge(
     column: e.column ?? 0,
     filePath: e.sourceFilePath,
     language: e.sourceLanguage,
+    ...(e.sourceLanguage === 'zig' && Array.isArray(e.metadata?.refCandidates) &&
+      e.metadata.refCandidates.every((candidate) => typeof candidate === 'string')
+      ? { candidates: e.metadata.refCandidates as string[] } : {}),
   };
 }

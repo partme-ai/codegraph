@@ -442,7 +442,6 @@ const INSTANTIATION_KINDS: ReadonlySet<string> = new Set([
   'composite_literal',               // go — `Widget{...}` / `pkga.Widget{...}`
   'struct_expression',               // rust — `Widget { n: 1 }` / `m::Widget { .. }`
   'instance_expression',             // scala — `new Monoid[Int] { ... }`
-  'struct_initializer',              // zig — `Widget{ .n = 1 }` / `pkg.Widget{...}`
 ]);
 
 /**
@@ -2021,7 +2020,7 @@ export class TreeSitterExtractor {
     // produce an `instantiates` reference. Children still walked so
     // nested calls inside the constructor args (`new Foo(bar())`) get
     // their own `calls` refs.
-    else if (INSTANTIATION_KINDS.has(nodeType) || this.isVbnetConstructorShapedArrayCreation(node)) {
+    else if ((INSTANTIATION_KINDS.has(nodeType) || (this.language === 'zig' && nodeType === 'struct_initializer')) || this.isVbnetConstructorShapedArrayCreation(node)) {
       this.extractInstantiation(node);
       // Java/C# `new T(...) { ... }` — anonymous class with body. Without
       // extracting it as a class node + its methods, the interface→impl
@@ -3343,7 +3342,7 @@ export class TreeSitterExtractor {
         // A `type`-typed field node (zig container_field and kin) carries
         // its type beside the name — mirror the declarator paths'
         // `Type name` signature so search finds the field by its type.
-        const typeNode = getChildByField(node, 'type');
+        const typeNode = this.language === 'zig' ? getChildByField(node, 'type') : null;
         const typeText = typeNode ? getNodeText(typeNode, this.source) : undefined;
         const fieldNode = this.createNode(fieldKind, name, node, {
           docstring,
@@ -3354,8 +3353,8 @@ export class TreeSitterExtractor {
         // Same as the declarator paths: emit `references` to the field's
         // annotated type (#381).
         if (fieldNode) {
-          this.extractTypeAnnotations(node, fieldNode.id);
           if (this.language === 'zig') {
+            this.extractTypeAnnotations(node, fieldNode.id);
             const initializer = node.namedChildren.find((c, i) => i > 0 && c.id !== typeNode?.id);
             if (initializer) {
               this.nodeStack.push(fieldNode.id);
@@ -7676,7 +7675,7 @@ export class TreeSitterExtractor {
 
       if (this.extractor!.callTypes.includes(nodeType)) {
         this.extractCall(node);
-      } else if (INSTANTIATION_KINDS.has(nodeType) || this.isVbnetConstructorShapedArrayCreation(node)) {
+      } else if ((INSTANTIATION_KINDS.has(nodeType) || (this.language === 'zig' && nodeType === 'struct_initializer')) || this.isVbnetConstructorShapedArrayCreation(node)) {
         // `new Foo()` inside a function body — emit an `instantiates`
         // reference. Without this branch the body walker only knew
         // about `call_expression`, so constructor invocations

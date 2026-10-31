@@ -25,7 +25,7 @@ schema migration. Re-index an existing project to discover its Zig files.
 
 ## Grammar provenance
 
-The grammar source archive, patch, tool versions, SHA256 checksums and license
+The grammar source archive, vendored source change, tool versions, SHA256 checksums and license
 are recorded in [the grammar build instructions](grammars/tree-sitter-zig.md).
 The checked-in grammar and its MIT notice are copied into production packages.
 The grammar is prebuilt; normal application builds do not rebuild it.
