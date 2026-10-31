@@ -8,11 +8,8 @@ on:
       - '.github/workflows/deploy-site.yml'
   workflow_dispatch:
 
-# Allow GITHUB_TOKEN to deploy to Pages and verify the deployment origin.
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 # One deploy at a time; let an in-progress run finish.
 concurrency:
@@ -29,11 +26,31 @@ jobs:
         uses: withastro/action@v6
         with:
           path: site
-          node-version: 22
+          node-version: 24
 
-  deploy:
+  check-pages:
     needs: build
     runs-on: ubuntu-latest
+    outputs:
+      deploy: ${{ steps.pages.outputs.deploy }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Test Pages deployment decision
+        run: bash scripts/test-pages-deploy.sh
+      - name: Check repository Pages configuration
+        id: pages
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/check-pages-deploy.sh
+
+  deploy:
+    needs: [build, check-pages]
+    if: ${{ needs['check-pages'].outputs.deploy == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
