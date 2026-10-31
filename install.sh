@@ -37,7 +37,7 @@ case "$os" in
   Linux)  os="linux" ;;
   MINGW*|MSYS*|CYGWIN*)
     echo "codegraph: on Windows, open PowerShell and run:" >&2
-    echo "  irm https://raw.githubusercontent.com/partme-ai/codegraph/main/install.ps1 | iex" >&2
+    echo "  irm https://github.com/partme-ai/codegraph/releases/download/v1.6.2-zig/install.ps1 | iex" >&2
     exit 1
     ;;
   *) echo "codegraph: unsupported OS '$os'." >&2; exit 1 ;;
